@@ -3,3 +3,4 @@ gerbers*
 *.lck
 *-backups
 *cache
+*.swp
