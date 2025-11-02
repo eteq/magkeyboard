@@ -1,0 +1,21 @@
+Make a schematic/footprint for the key-holder
+
+Use heirarchical sheets to do the schematic design, with the "simple" layout just for the keys
+
+Use https://github.com/gauravmm/HierarchicalPcb to replicate
+
+Finalize PCB
+
+
+Use sk6812 5050 for led, but check it's relatively solderable pads
+
+caps: dont go smaller than 0805?
+
+good TMR @ digikey: RR112-1G42-531 or CT8150 
+good double quad mux @ digikey: MC74LVX4052 or maybe TMUX1309A
+
+possible revisions for r2:
+* make xiao pads easier to solder
+* make battery holes wider?  
+* R1-> 1M
+* add nmos with gate on pin 7/D6, source grd, drain connected to Q2 gate
