@@ -2,17 +2,17 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{Level, Output, OutputDrive, Flex, Pull};
-use embassy_nrf::{bind_interrupts, saadc, peripherals, uarte, pwm, spim};
+use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_time::{Instant, Timer, Duration};
+use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, uarte};
+use embassy_time::{Duration, Instant, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
 use heapless::format;
-use palette::{Hsv, Srgb, IntoColor};
+use palette::{Hsv, IntoColor, Srgb};
 
-use ws2812_spi::Ws2812;
 use smart_leds::SmartLedsWrite;
+use ws2812_spi::Ws2812;
 
 const N_KEYS: usize = 24;
 const LED_POWERUP_TIME: Duration = Duration::from_millis(1); // this is just a guess - implicitly it's everything connected to vhi
@@ -21,7 +21,7 @@ bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
     UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
-}); 
+});
 
 fn vhi_on(vhi_pin: &mut Flex) {
     vhi_pin.set_low();
@@ -35,17 +35,22 @@ fn vhi_off(vhi_pin: &mut Flex) {
 fn hsv_on_board_leds(pwm: &mut pwm::SimplePwm, h: f32, s: f32, v: f32) {
     let rgb: Srgb = Hsv::new(h, s, v).into_color();
     let rgb: Srgb<u8> = rgb.into_format();
-    
+
     let r_duty = DutyCycle::normal(rgb.red as u16);
     let g_duty = DutyCycle::normal(rgb.green as u16);
     let b_duty = DutyCycle::normal(rgb.blue as u16);
     pwm.set_all_duties([r_duty, g_duty, b_duty, DutyCycle::normal(0)]);
 }
 
-fn hsv_cycle_ws2812_data(phase: f32, s: f32, v: f32, fracrainbow: f32) -> [smart_leds::RGB8; N_KEYS] {
+fn hsv_cycle_ws2812_data(
+    phase: f32,
+    s: f32,
+    v: f32,
+    fracrainbow: f32,
+) -> [smart_leds::RGB8; N_KEYS] {
     let mut data = [smart_leds::RGB8::default(); N_KEYS];
     for (i, led) in data.iter_mut().enumerate() {
-        let h = ((i as f32)/ (N_KEYS as f32) * fracrainbow + phase) % 1.0 * 360.;
+        let h = ((i as f32) / (N_KEYS as f32) * fracrainbow + phase) % 1.0 * 360.;
         let rgb: Srgb = Hsv::new(h, s, v).into_color();
         let rgb: Srgb<u8> = rgb.into_format();
         *led = smart_leds::RGB8::new(rgb.red, rgb.green, rgb.blue);
@@ -71,7 +76,6 @@ async fn main(_spawner: Spawner) {
     let mut vhi_pin = Flex::new(p.P1_12);
     vhi_off(&mut vhi_pin); // should be the default state, but just in case
 
-
     // setup board LEDs using PWM - note these are active *low*, so idle level is high
     let mut pwm_config = embassy_nrf::pwm::SimpleConfig::default();
     // not much visible difference between standard and high drive on the board LEDs, so use standard to save power
@@ -85,20 +89,31 @@ async fn main(_spawner: Spawner) {
     pwm_config.max_duty = 255; // compatible with u8 rgb values
 
     let mut pwm = pwm::SimplePwm::new_3ch(p.PWM0, p.P0_26, p.P0_30, p.P0_06, &pwm_config);
-    pwm.set_all_duties([DutyCycle::normal(255), DutyCycle::normal(0), DutyCycle::normal(0), DutyCycle::normal(0)]); //only red on
+    pwm.set_all_duties([
+        DutyCycle::normal(255),
+        DutyCycle::normal(0),
+        DutyCycle::normal(0),
+        DutyCycle::normal(0),
+    ]); //only red on
     pwm.enable();
 
     // setup DIN for key leds - note only works if vhi is on
     let mut spi_config = spim::Config::default();
     spi_config.frequency = spim::Frequency::M4;
-    let mut keyleds = Ws2812::new(spim::Spim::new_txonly_nosck(p.SPI3, Irqs, p.P0_15, spi_config));
+    let mut keyleds = Ws2812::new(spim::Spim::new_txonly_nosck(
+        p.SPI3, Irqs, p.P0_15, spi_config,
+    ));
     // power up vhi for the leds
     vhi_on(&mut vhi_pin);
     Timer::after(LED_POWERUP_TIME).await;
     // blink them for a moment at startup
-    keyleds.write([smart_leds::RGB8::new(1, 0, 1); N_KEYS].iter().cloned()).expect("couldn't blink key leds");
+    keyleds
+        .write([smart_leds::RGB8::new(1, 0, 1); N_KEYS].iter().cloned())
+        .expect("couldn't blink key leds");
     Timer::after(Duration::from_millis(100)).await;
-    keyleds.write([smart_leds::RGB8::new(0, 0, 0); N_KEYS].iter().cloned()).expect("couldn't clear key leds");
+    keyleds
+        .write([smart_leds::RGB8::new(0, 0, 0); N_KEYS].iter().cloned())
+        .expect("couldn't clear key leds");
     //TODO: compare to using pwm for key leds p.P0_15
 
     // setup accelerometer i2c
@@ -146,45 +161,73 @@ async fn main(_spawner: Spawner) {
     adc.calibrate().await;
 
     //green LED on to indicate setup complete
-    pwm.set_all_duties([DutyCycle::normal(0), DutyCycle::normal(255), DutyCycle::normal(0), DutyCycle::normal(0)]); 
-    
+    pwm.set_all_duties([
+        DutyCycle::normal(0),
+        DutyCycle::normal(255),
+        DutyCycle::normal(0),
+        DutyCycle::normal(0),
+    ]);
 
-    loop { 
-        let abpattern = [[Level::Low, Level::Low],
-                                          [Level::High, Level::Low],
-                                          [Level::Low, Level::High],
-                                          [Level::High, Level::High]];
+    loop {
+        let abpattern = [
+            [Level::Low, Level::Low],
+            [Level::High, Level::Low],
+            [Level::Low, Level::High],
+            [Level::High, Level::High],
+        ];
 
-        let mut allbuff = [0i16; 6*4];
-        
+        let mut allbuff = [0i16; 6 * 4];
+
         let presample = Instant::now();
 
         for (index, ablevel) in abpattern.iter().enumerate() {
-            for muxen in muxens.iter_mut() { muxen.set_high(); }
+            for muxen in muxens.iter_mut() {
+                muxen.set_high();
+            }
             mux_a.set_level(ablevel[0]);
             mux_b.set_level(ablevel[1]);
-            for muxen in muxens.iter_mut() { muxen.set_low(); }
+            for muxen in muxens.iter_mut() {
+                muxen.set_low();
+            }
 
             let mut buf = [0i16; 6];
             adc.sample(&mut buf).await;
 
-            allbuff[index*6..(index+1)*6].copy_from_slice(&buf);
-
+            allbuff[index * 6..(index + 1) * 6].copy_from_slice(&buf);
         }
 
         let postsample = Instant::now();
 
-        let midsample_micros = (presample.as_micros() + postsample.as_micros())/2;
-        defmt::info!("reads from adc completed at {} sec", midsample_micros as f32 * 1e-6);
+        let midsample_micros = (presample.as_micros() + postsample.as_micros()) / 2;
+        defmt::info!(
+            "reads from adc completed at {} sec",
+            midsample_micros as f32 * 1e-6
+        );
 
         for data in allbuff.iter() {
             let s = format!(7; "{},", data).expect("formatting failed");
-            uart.write(s.as_bytes()).await.expect("uart couldn't write data");
+            uart.write(s.as_bytes())
+                .await
+                .expect("uart couldn't write data");
         }
-        uart.write(format!(23; "{}\r\n", midsample_micros).expect("ts formatting failed").as_bytes()).await.expect("uart couldn't write timestamp");
-        
-        hsv_on_board_leds(&mut pwm, ((postsample.as_millis() as f32)*(360./10000.)) % 360., 1.0, 1.0); //color cycle in 10 secs
-        let ws2812_data = hsv_cycle_ws2812_data((postsample.as_millis() as f32)/5000., 1.0, 0.015, 0.3); // rotates through 5 seconds
-        keyleds.write(ws2812_data.iter().cloned()).expect("couldn't update key leds");
+        uart.write(
+            format!(23; "{}\r\n", midsample_micros)
+                .expect("ts formatting failed")
+                .as_bytes(),
+        )
+        .await
+        .expect("uart couldn't write timestamp");
+
+        hsv_on_board_leds(
+            &mut pwm,
+            ((postsample.as_millis() as f32) * (360. / 10000.)) % 360.,
+            1.0,
+            1.0,
+        ); //color cycle in 10 secs
+        let ws2812_data =
+            hsv_cycle_ws2812_data((postsample.as_millis() as f32) / 5000., 1.0, 0.015, 0.3); // rotates through 5 seconds
+        keyleds
+            .write(ws2812_data.iter().cloned())
+            .expect("couldn't update key leds");
     }
 }
