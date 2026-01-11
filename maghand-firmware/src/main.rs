@@ -87,6 +87,7 @@ async fn main(_spawner: Spawner) {
     saadc_config.oversample = saadc::Oversample::BYPASS;
 
     let mut adc = saadc::Saadc::new(p.SAADC, Irqs, saadc_config, channel_configs);
+    adc.calibrate().await;
 
     redled.set_high();
     greenled.set_low();
