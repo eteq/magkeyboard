@@ -4,3 +4,6 @@ gerbers*
 *-backups
 *cache
 *.swp
+
+# testing data conventional name
+magtest*
