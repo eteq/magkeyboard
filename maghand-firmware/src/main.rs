@@ -4,8 +4,9 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, uarte};
+use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
 use embassy_time::{Duration, Instant, Timer};
+use static_cell::ConstStaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 use heapless::format;
@@ -14,13 +15,23 @@ use palette::{Hsv, IntoColor, Srgb};
 use smart_leds::SmartLedsWrite;
 use ws2812_spi::Ws2812;
 
+
+// alloc only needed for lsm6ds3tr crate.  Might not be worth that.
+use lsm6ds3tr;
+use embedded_alloc::LlffHeap as Heap;
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+
 const N_KEYS: usize = 24;
 const LED_POWERUP_TIME: Duration = Duration::from_millis(1); // this is just a guess - implicitly it's everything connected to vhi
+const IMU_POWERUP_TIME: Duration = Duration::from_millis(35); // lsm6ds3tr datasheet
 
 bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
     UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
 });
 
 fn vhi_on(vhi_pin: &mut Flex) {
@@ -32,6 +43,7 @@ fn vhi_off(vhi_pin: &mut Flex) {
     vhi_pin.set_as_input(Pull::None);
 }
 
+#[allow(dead_code)]
 fn hsv_on_board_leds(pwm: &mut pwm::SimplePwm, h: f32, s: f32, v: f32) {
     let rgb: Srgb = Hsv::new(h, s, v).into_color();
     let rgb: Srgb<u8> = rgb.into_format();
@@ -116,11 +128,47 @@ async fn main(_spawner: Spawner) {
         .expect("couldn't clear key leds");
     //TODO: compare to using pwm for key leds p.P0_15
 
-    // setup accelerometer i2c
-    // 6D_PWR: p.P0_08 -> output high to enable accelerometer
-    // 6D_INT1: p.P0_11 -> interrupt input from accelerometer
+    // setup imu on internal i2c
+    // 6D_PWR: p.P1_08 -> output high to enable imu power
+    // 6D_INT1: p.P0_11 -> interrupt input from imu
     // 6D_i2C_SDA: p.P0_07
     // 6D_i2C_SCL: p.P0_27
+    let mut imu_pwr_pin = Output::new(p.P1_08, Level::Low, OutputDrive::Standard);
+    imu_pwr_pin.set_high();
+    Timer::after(IMU_POWERUP_TIME).await;
+
+    let mut twim_config = twim::Config::default();
+    twim_config.frequency = twim::Frequency::K100;
+    twim_config.sda_pullup = false;
+    twim_config.scl_pullup = false;
+    static RAM_BUFFER: ConstStaticCell<[u8; 16]> = ConstStaticCell::new([0; 16]); // not sure what size is needed for lsm6ds3tr crate, this is just a guess
+    let mut i2c = twim::Twim::new(
+        p.TWISPI0,
+        Irqs,
+        p.P0_07,
+        p.P0_27,
+        twim_config,
+        RAM_BUFFER.take(),
+    );
+
+
+    defmt::info!("preread");
+    let mut rd_buffer = [0u8; 1];
+    i2c.blocking_write_read(0b1101010, &[0x0f], &mut rd_buffer).expect("LSM6DS3TR-C WHO_AM_I read failed");
+    defmt::info!("LSM6DS3TR-C WHO_AM_I: {:x}", rd_buffer[0]);
+
+    // TODO: fix lsm6ds3tr to allow gyro setting - a register should be pub that isnt: https://gitlab.com/mtczekajlo/lsm6ds3tr-rs/-/merge_requests/7
+    let accel_settings = lsm6ds3tr::AccelSettings::default()
+        .with_sample_rate(lsm6ds3tr::AccelSampleRate::_208Hz)
+        .with_scale(lsm6ds3tr::AccelScale::_2G);
+    let imu_settings = lsm6ds3tr::LsmSettings::basic()
+        .with_low_performance_mode()
+        .with_accel(accel_settings);
+    let mut imu = lsm6ds3tr::LSM6DS3TR::new(lsm6ds3tr::interface::I2cInterface::new(i2c))
+        .with_settings(imu_settings);
+    defmt::info!("preinit");
+    imu.init().expect("LSM6DS3TR-C initialization failure!");
+    defmt::info!("postinit");
 
     // setup GPIO to enable various keys
     let mut muxen01 = Output::new(p.P1_13, Level::High, OutputDrive::Standard);
@@ -169,6 +217,13 @@ async fn main(_spawner: Spawner) {
     ]);
 
     loop {
+        let accelg = imu.read_accel().expect("couldn't read accel data");
+        let r_duty = DutyCycle::normal((255.*accelg.x/2.0) as u16);
+        let g_duty = DutyCycle::normal((255.*accelg.y/2.0) as u16);
+        let b_duty = DutyCycle::normal((255.*accelg.z/2.0) as u16);
+        pwm.set_all_duties([r_duty, g_duty, b_duty, DutyCycle::normal(0)]);
+
+
         let abpattern = [
             [Level::Low, Level::Low],
             [Level::High, Level::Low],
@@ -197,12 +252,8 @@ async fn main(_spawner: Spawner) {
         }
 
         let postsample = Instant::now();
-
         let midsample_micros = (presample.as_micros() + postsample.as_micros()) / 2;
-        defmt::info!(
-            "reads from adc completed at {} sec",
-            midsample_micros as f32 * 1e-6
-        );
+        
 
         for data in allbuff.iter() {
             let s = format!(7; "{},", data).expect("formatting failed");
@@ -210,6 +261,14 @@ async fn main(_spawner: Spawner) {
                 .await
                 .expect("uart couldn't write data");
         }
+
+        uart.write(
+            format!(30; "{:.3},{:.3},{:.3},", accelg.x, accelg.y, accelg.z)
+                .expect("accel formatting failed")
+                .as_bytes(),
+        )
+        .await
+        .expect("uart couldn't write accel");
         uart.write(
             format!(23; "{}\r\n", midsample_micros)
                 .expect("ts formatting failed")
@@ -218,16 +277,15 @@ async fn main(_spawner: Spawner) {
         .await
         .expect("uart couldn't write timestamp");
 
-        hsv_on_board_leds(
-            &mut pwm,
-            ((postsample.as_millis() as f32) * (360. / 10000.)) % 360.,
-            1.0,
-            1.0,
-        ); //color cycle in 10 secs
         let ws2812_data =
             hsv_cycle_ws2812_data((postsample.as_millis() as f32) / 5000., 1.0, 0.015, 0.3); // rotates through 5 seconds
         keyleds
             .write(ws2812_data.iter().cloned())
             .expect("couldn't update key leds");
+
+        defmt::info!(
+            "loop completed at {} sec",
+            Instant::now().as_micros() as f32 * 1e-6
+        );
     }
 }

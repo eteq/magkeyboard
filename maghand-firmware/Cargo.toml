@@ -35,6 +35,10 @@ palette = { version = "0.7.6", default-features = false, features = ["libm"] }
 
 smart-leds = "0.4.0"
 ws2812-spi = "0.5.1"
+static_cell = "2.1.1"
+
+lsm6ds3tr = "0.2.2"
+embedded-alloc = "0.6.0"
 
 [profile.release]
 debug = 2
