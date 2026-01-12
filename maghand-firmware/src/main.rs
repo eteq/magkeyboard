@@ -75,6 +75,7 @@ async fn main(_spawner: Spawner) {
     let mut nrf_config = embassy_nrf::config::Config::default();
     nrf_config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     nrf_config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+    //nrf_config.dcdc = embassy_nrf::config::DcdcConfig {reg0: false, reg1:true, reg0_voltage: None}; // TODO: decide if dc/dc is worth it in vusb or battery mode
     let mut p = embassy_nrf::init(nrf_config);
 
     // setup UART for comms
@@ -281,8 +282,15 @@ async fn main(_spawner: Spawner) {
         .await
         .expect("uart couldn't write timestamp");
 
-        let ws2812_data =
-            hsv_cycle_ws2812_data((postsample.as_millis() as f32) / 5000., 1.0, 0.015, 0.3); // rotates through 5 seconds
+        let mut ws2812_data =
+            hsv_cycle_ws2812_data((postsample.as_millis() as f32) / 5000., 1.0, 0.05, 0.3); // rotates through 5 seconds
+
+        for i in 0..N_KEYS {
+            if i != 14 && i != 6  {
+                ws2812_data[i] = smart_leds::RGB8::new(0, 0, 0);
+            }
+        }
+
         keyleds
             .write(ws2812_data.iter().cloned())
             .expect("couldn't update key leds");
