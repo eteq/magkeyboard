@@ -89,11 +89,12 @@ async fn main(_spawner: Spawner) {
     vhi_off(&mut vhi_pin); // should be the default state, but just in case
 
     // setup board LEDs using PWM - note these are active *low*, so idle level is high
+    // power usage with no leds in is ~0.9 mA
     let mut pwm_config = embassy_nrf::pwm::SimpleConfig::default();
-    // not much visible difference between standard and high drive on the board LEDs, so use standard to save power
-    pwm_config.ch0_drive = OutputDrive::Standard;
-    pwm_config.ch1_drive = OutputDrive::Standard;
-    pwm_config.ch2_drive = OutputDrive::Standard;
+    // not much visible difference between standard and high drive on the board LEDs... but high drive seems to give *less* power usage...
+    pwm_config.ch0_drive = OutputDrive::HighDrive;
+    pwm_config.ch1_drive = OutputDrive::HighDrive;
+    pwm_config.ch2_drive = OutputDrive::HighDrive;
     pwm_config.ch0_idle_level = Level::High;
     pwm_config.ch1_idle_level = Level::High;
     pwm_config.ch2_idle_level = Level::High;
@@ -129,6 +130,7 @@ async fn main(_spawner: Spawner) {
     //TODO: compare to using pwm for key leds p.P0_15
 
     // setup imu on internal i2c
+    // total power usage with both the imu and the uart output is ~0.7 mA
     // 6D_PWR: p.P1_08 -> output high to enable imu power
     // 6D_INT1: p.P0_11 -> interrupt input from imu
     // 6D_i2C_SDA: p.P0_07
@@ -142,7 +144,7 @@ async fn main(_spawner: Spawner) {
     twim_config.sda_pullup = false;
     twim_config.scl_pullup = false;
     static RAM_BUFFER: ConstStaticCell<[u8; 16]> = ConstStaticCell::new([0; 16]); // not sure what size is needed for lsm6ds3tr crate, this is just a guess
-    let mut i2c = twim::Twim::new(
+    let i2c = twim::Twim::new(
         p.TWISPI0,
         Irqs,
         p.P0_07,
@@ -150,12 +152,6 @@ async fn main(_spawner: Spawner) {
         twim_config,
         RAM_BUFFER.take(),
     );
-
-
-    defmt::info!("preread");
-    let mut rd_buffer = [0u8; 1];
-    i2c.blocking_write_read(0b1101010, &[0x0f], &mut rd_buffer).expect("LSM6DS3TR-C WHO_AM_I read failed");
-    defmt::info!("LSM6DS3TR-C WHO_AM_I: {:x}", rd_buffer[0]);
 
     // TODO: fix lsm6ds3tr to allow gyro setting - a register should be pub that isnt: https://gitlab.com/mtczekajlo/lsm6ds3tr-rs/-/merge_requests/7
     let accel_settings = lsm6ds3tr::AccelSettings::default()
@@ -166,9 +162,7 @@ async fn main(_spawner: Spawner) {
         .with_accel(accel_settings);
     let mut imu = lsm6ds3tr::LSM6DS3TR::new(lsm6ds3tr::interface::I2cInterface::new(i2c))
         .with_settings(imu_settings);
-    defmt::info!("preinit");
     imu.init().expect("LSM6DS3TR-C initialization failure!");
-    defmt::info!("postinit");
 
     // setup GPIO to enable various keys
     let mut muxen01 = Output::new(p.P1_13, Level::High, OutputDrive::Standard);
