@@ -269,6 +269,16 @@ async fn main(_spawner: Spawner) {
         )
         .await
         .expect("uart couldn't write accel");
+
+        let gyrodps = imu.read_gyro().expect("couldn't read gyro data");
+        uart.write(
+            format!(30; "{:.3},{:.3},{:.3},", gyrodps.x, gyrodps.y, gyrodps.z)
+                .expect("gyro formatting failed")
+                .as_bytes(),
+        )
+        .await
+        .expect("uart couldn't write gyro");
+
         uart.write(
             format!(23; "{}\r\n", midsample_micros)
                 .expect("ts formatting failed")
