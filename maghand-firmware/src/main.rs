@@ -4,12 +4,11 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte,timer};
+use embassy_time::{Duration, Timer};
 use static_cell::ConstStaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
-use heapless::format;
 use palette::{Hsv, IntoColor, Srgb};
 
 use smart_leds::SmartLedsWrite;
@@ -175,19 +174,19 @@ async fn main(_spawner: Spawner) {
     let mut mux_b = Output::new(p.P0_10, Level::Low, OutputDrive::Standard);
 
     // setup ADC for key position reading
-    let keyband0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow());
-    let keyband1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow());
-    let keyband2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow());
-    let keyband3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow());
-    let keyband4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow());
-    let keyband5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow());
+    let keyset0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow());
+    let keyset1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow());
+    let keyset2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow());
+    let keyset3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow());
+    let keyset4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow());
+    let keyset5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow());
     let mut channel_configs = [
-        keyband0_channel_config,
-        keyband1_channel_config,
-        keyband2_channel_config,
-        keyband3_channel_config,
-        keyband4_channel_config,
-        keyband5_channel_config,
+        keyset0_channel_config,
+        keyset1_channel_config,
+        keyset2_channel_config,
+        keyset3_channel_config,
+        keyset4_channel_config,
+        keyset5_channel_config,
     ];
     for config in channel_configs.iter_mut() {
         config.reference = saadc::Reference::VDD1_4;
@@ -210,94 +209,51 @@ async fn main(_spawner: Spawner) {
         DutyCycle::normal(0),
         DutyCycle::normal(0),
     ]);
+    // 32 will then be what's going into channel 3.  Also 0,1 will be disconnected but then connected in the second scan, while 45 will stay disconnected
+    muxen01.set_high();
+    muxen23.set_low();
+    muxen45.set_high();
+    mux_a.set_low();
+    mux_b.set_high();
+    Timer::after(Duration::from_millis(10)).await;
 
+    defmt::info!("running sampler continuous");
+    let mut bufs = [[[0; 6]; 500]; 2];
+    let mut i: isize = -1;
+    adc
+        .run_task_sampler(
+            p.TIMER0.reborrow(),
+            p.PPI_CH0.reborrow(),
+            p.PPI_CH1.reborrow(),
+            timer::Frequency::F1MHz,
+            1000, // this yields 1 khz
+            &mut bufs,
+            |_buf| {
+                muxen01.set_low();
+                i+=1;
+                if i >= 1 { saadc::CallbackResult::Stop } else { saadc::CallbackResult::Continue }
+            },
+        )
+        .await;
+
+    defmt::info!("rinished sampler continuous");
+    defmt::info!("bufs:{:?}", &bufs);
     loop {
-        let accelg = imu.read_accel().expect("couldn't read accel data");
-        let r_duty = DutyCycle::normal((255.*accelg.x/2.0) as u16);
-        let g_duty = DutyCycle::normal((255.*accelg.y/2.0) as u16);
-        let b_duty = DutyCycle::normal((255.*accelg.z/2.0) as u16);
-        pwm.set_all_duties([r_duty, g_duty, b_duty, DutyCycle::normal(0)]);
-
-
-        let abpattern = [
-            [Level::Low, Level::Low],
-            [Level::High, Level::Low],
-            [Level::Low, Level::High],
-            [Level::High, Level::High],
-        ];
-
-        let mut allbuff = [0i16; 6 * 4];
-
-        let presample = Instant::now();
-
-        for (index, ablevel) in abpattern.iter().enumerate() {
-            for muxen in muxens.iter_mut() {
-                muxen.set_high();
-            }
-            mux_a.set_level(ablevel[0]);
-            mux_b.set_level(ablevel[1]);
-            for muxen in muxens.iter_mut() {
-                muxen.set_low();
-            }
-
-            let mut buf = [0i16; 6];
-            adc.sample(&mut buf).await;
-
-            allbuff[index * 6..(index + 1) * 6].copy_from_slice(&buf);
-        }
-
-        let postsample = Instant::now();
-        let midsample_micros = (presample.as_micros() + postsample.as_micros()) / 2;
-        
-
-        for data in allbuff.iter() {
-            let s = format!(7; "{},", data).expect("formatting failed");
-            uart.write(s.as_bytes())
-                .await
-                .expect("uart couldn't write data");
-        }
-
-        uart.write(
-            format!(30; "{:.3},{:.3},{:.3},", accelg.x, accelg.y, accelg.z)
-                .expect("accel formatting failed")
-                .as_bytes(),
-        )
-        .await
-        .expect("uart couldn't write accel");
-
-        let gyrodps = imu.read_gyro().expect("couldn't read gyro data");
-        uart.write(
-            format!(30; "{:.3},{:.3},{:.3},", gyrodps.x, gyrodps.y, gyrodps.z)
-                .expect("gyro formatting failed")
-                .as_bytes(),
-        )
-        .await
-        .expect("uart couldn't write gyro");
-
-        uart.write(
-            format!(23; "{}\r\n", midsample_micros)
-                .expect("ts formatting failed")
-                .as_bytes(),
-        )
-        .await
-        .expect("uart couldn't write timestamp");
-
-        let mut ws2812_data =
-            hsv_cycle_ws2812_data((postsample.as_millis() as f32) / 5000., 1.0, 0.05, 0.3); // rotates through 5 seconds
-
-        for i in 0..N_KEYS {
-            if i != 14 && i != 6  {
-                ws2812_data[i] = smart_leds::RGB8::new(0, 0, 0);
-            }
-        }
-
-        keyleds
-            .write(ws2812_data.iter().cloned())
-            .expect("couldn't update key leds");
-
-        defmt::info!(
-            "loop completed at {} sec",
-            Instant::now().as_micros() as f32 * 1e-6
-        );
+        // main loop does nothing but blinky now
+        Timer::after(Duration::from_millis(500)).await;
+          pwm.set_all_duties([
+                DutyCycle::normal(0),
+                DutyCycle::normal(100),
+                DutyCycle::normal(100),
+                DutyCycle::normal(0),
+            ]);
+        Timer::after(Duration::from_millis(500)).await;
+          pwm.set_all_duties([
+                DutyCycle::normal(0),
+                DutyCycle::normal(0),
+                DutyCycle::normal(0),
+                DutyCycle::normal(0),
+            ]);
+    defmt::info!("looped continuous");
     }
 }
