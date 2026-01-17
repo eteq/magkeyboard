@@ -4,8 +4,8 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte,timer};
-use embassy_time::{Duration, Timer};
+use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
+use embassy_time::{Duration, Timer, Instant};
 use static_cell::ConstStaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -53,6 +53,7 @@ fn hsv_on_board_leds(pwm: &mut pwm::SimplePwm, h: f32, s: f32, v: f32) {
     pwm.set_all_duties([r_duty, g_duty, b_duty, DutyCycle::normal(0)]);
 }
 
+#[allow(dead_code)]
 fn hsv_cycle_ws2812_data(
     phase: f32,
     s: f32,
@@ -78,11 +79,11 @@ async fn main(_spawner: Spawner) {
     let mut p = embassy_nrf::init(nrf_config);
 
     // setup UART for comms
-    let mut uarte_config = uarte::Config::default();
-    uarte_config.parity = uarte::Parity::EXCLUDED;
-    uarte_config.baudrate = uarte::Baudrate::BAUD115200;
+    // let mut uarte_config = uarte::Config::default();
+    // uarte_config.parity = uarte::Parity::EXCLUDED;
+    // uarte_config.baudrate = uarte::Baudrate::BAUD115200;
 
-    let mut uart = uarte::Uarte::new(p.UARTE0, p.P1_05, p.P1_03, Irqs, uarte_config);
+    // let mut uart = uarte::Uarte::new(p.UARTE0, p.P1_05, p.P1_03, Irqs, uarte_config);
 
     // setup vhi gpio
     let mut vhi_pin = Flex::new(p.P1_12);
@@ -168,25 +169,25 @@ async fn main(_spawner: Spawner) {
     let mut muxen01 = Output::new(p.P1_13, Level::High, OutputDrive::Standard);
     let mut muxen23 = Output::new(p.P1_14, Level::High, OutputDrive::Standard);
     let mut muxen45 = Output::new(p.P1_15, Level::High, OutputDrive::Standard);
-    let mut muxens = [&mut muxen01, &mut muxen23, &mut muxen45];
+    let mut _muxens = [&mut muxen01, &mut muxen23, &mut muxen45];
 
     let mut mux_a = Output::new(p.P0_09, Level::Low, OutputDrive::Standard);
     let mut mux_b = Output::new(p.P0_10, Level::Low, OutputDrive::Standard);
 
     // setup ADC for key position reading
-    let keyset0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow());
-    let keyset1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow());
-    let keyset2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow());
-    let keyset3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow());
-    let keyset4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow());
-    let keyset5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow());
+    let _keyset0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow()); //01X
+    let _keyset1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow()); // 01Y
+    let _keyset2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow()); // 23X
+    let keyset3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow()); // 23Y
+    let _keyset4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow());
+    let _keyset5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow());
     let mut channel_configs = [
-        keyset0_channel_config,
-        keyset1_channel_config,
-        keyset2_channel_config,
+        //keyset0_channel_config,
+        //keyset1_channel_config,
+        //keyset2_channel_config,
         keyset3_channel_config,
-        keyset4_channel_config,
-        keyset5_channel_config,
+        //keyset4_channel_config,
+        //keyset5_channel_config,
     ];
     for config in channel_configs.iter_mut() {
         config.reference = saadc::Reference::VDD1_4;
@@ -209,51 +210,82 @@ async fn main(_spawner: Spawner) {
         DutyCycle::normal(0),
         DutyCycle::normal(0),
     ]);
-    // 32 will then be what's going into channel 3.  Also 0,1 will be disconnected but then connected in the second scan, while 45 will stay disconnected
-    muxen01.set_high();
-    muxen23.set_low();
-    muxen45.set_high();
+
+    // select key 2 on each channel
     mux_a.set_low();
     mux_b.set_high();
     Timer::after(Duration::from_millis(10)).await;
 
-    defmt::info!("running sampler continuous");
-    let mut bufs = [[[0; 6]; 500]; 2];
-    let mut i: isize = -1;
-    adc
-        .run_task_sampler(
-            p.TIMER0.reborrow(),
-            p.PPI_CH0.reborrow(),
-            p.PPI_CH1.reborrow(),
-            timer::Frequency::F1MHz,
-            1000, // this yields 1 khz
-            &mut bufs,
-            |_buf| {
-                muxen01.set_low();
-                i+=1;
-                if i >= 1 { saadc::CallbackResult::Stop } else { saadc::CallbackResult::Continue }
-            },
-        )
-        .await;
+    let khz_sampling: usize = 200;
+    let divisor = (16_000_000 / (khz_sampling * 1000)) as u16;
 
-    defmt::info!("rinished sampler continuous");
-    defmt::info!("bufs:{:?}", &bufs);
+    defmt::info!("running sampler continuous @ {} kHz", khz_sampling);
+    let mut bufs = [[[0; 1]; 10000]; 2];
+    adc.run_timer_sampler::<u8, _, _>(&mut bufs, divisor, |_buf| {
+        saadc::CallbackResult::Stop
+    }).await;
+
+    defmt::info!("finished prerun sampler");
+    defmt::info!("bufspre:{:?}", &bufs[0]);
+
+    muxen23.set_low();
+    Timer::after(Duration::from_millis(100)).await;
+
+
+    // adc
+    //     .run_task_sampler(
+    //         p.TIMER0.reborrow(),
+    //         p.PPI_CH0.reborrow(),
+    //         p.PPI_CH1.reborrow(),
+    //         timer::Frequency::F1MHz,
+    //         1000, // this yields 1 khz
+    //         &mut bufs,
+    //         |_buf| {
+    //             muxen01.set_low();
+    //             i+=1;
+    //             if i >= 1 { saadc::CallbackResult::Stop } else { saadc::CallbackResult::Continue }
+    //         },
+    //     )
+    //     .await;
+    //self.run_sampler(bufs, Some(sample_rate_divisor), || {}, sampler).await;
+
+    defmt::info!("starting loop");
+
+    pwm.set_all_duties([
+        DutyCycle::normal(0),
+        DutyCycle::normal(100),
+        DutyCycle::normal(100),
+        DutyCycle::normal(0),
+    ]);
+    
     loop {
-        // main loop does nothing but blinky now
-        Timer::after(Duration::from_millis(500)).await;
-          pwm.set_all_duties([
-                DutyCycle::normal(0),
-                DutyCycle::normal(100),
-                DutyCycle::normal(100),
-                DutyCycle::normal(0),
-            ]);
-        Timer::after(Duration::from_millis(500)).await;
-          pwm.set_all_duties([
-                DutyCycle::normal(0),
-                DutyCycle::normal(0),
-                DutyCycle::normal(0),
-                DutyCycle::normal(0),
-            ]);
-    defmt::info!("looped continuous");
+        let mut output_buffer = [[[0i16; 1]; 10000]; 8];
+
+        let mut start_sequence_time = [Instant::now() ; 8];
+
+        for i in 0..8 {
+            start_sequence_time[i] = Instant::now();
+            adc.run_timer_sampler::<u8, _, _>(&mut bufs, divisor, |_buf| {
+                saadc::CallbackResult::Stop
+            }).await;
+            output_buffer[i].copy_from_slice(&bufs[0]);
+        }
+        pwm.set_all_duties([
+            DutyCycle::normal(100),
+            DutyCycle::normal(100),
+            DutyCycle::normal(0),
+            DutyCycle::normal(0),
+        ]);
+        for i in 0..8 {
+            defmt::info!("Sample set {} took us={}", i, start_sequence_time[i].as_micros());
+        }
+        defmt::info!("bufs:{:?}", &output_buffer);
+
+        pwm.set_all_duties([
+            DutyCycle::normal(0),
+            DutyCycle::normal(100),
+            DutyCycle::normal(100),
+            DutyCycle::normal(0),
+        ]);
     }
 }
