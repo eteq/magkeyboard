@@ -5,7 +5,8 @@ use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
 use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
-use embassy_time::{Duration, Timer, Instant};
+use embassy_nrf::timer::Frequency;
+use embassy_time::{Duration, Timer};
 use static_cell::ConstStaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -69,6 +70,8 @@ fn hsv_cycle_ws2812_data(
     }
     data
 }
+
+const SCHMIDT_THRESHOLD: f32 = 0.2f32;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -169,25 +172,25 @@ async fn main(_spawner: Spawner) {
     let mut muxen01 = Output::new(p.P1_13, Level::High, OutputDrive::Standard);
     let mut muxen23 = Output::new(p.P1_14, Level::High, OutputDrive::Standard);
     let mut muxen45 = Output::new(p.P1_15, Level::High, OutputDrive::Standard);
-    let mut _muxens = [&mut muxen01, &mut muxen23, &mut muxen45];
+    let mut muxens = [&mut muxen01, &mut muxen23, &mut muxen45];
 
     let mut mux_a = Output::new(p.P0_09, Level::Low, OutputDrive::Standard);
     let mut mux_b = Output::new(p.P0_10, Level::Low, OutputDrive::Standard);
 
     // setup ADC for key position reading
-    let _keyset0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow()); //01X
-    let _keyset1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow()); // 01Y
-    let _keyset2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow()); // 23X
-    let keyset3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow()); // 23Y
-    let _keyset4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow());
-    let _keyset5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow());
+    let keyset0_channel_config = saadc::ChannelConfig::single_ended(p.P0_02.reborrow()); // 01X / 0
+    let keyset1_channel_config = saadc::ChannelConfig::single_ended(p.P0_03.reborrow()); // 01Y / 1
+    let keyset2_channel_config = saadc::ChannelConfig::single_ended(p.P0_04.reborrow()); // 23X / 2
+    let keyset3_channel_config = saadc::ChannelConfig::single_ended(p.P0_05.reborrow()); // 23Y / 3
+    let keyset4_channel_config = saadc::ChannelConfig::single_ended(p.P0_28.reborrow()); // 45X / 4
+    let keyset5_channel_config = saadc::ChannelConfig::single_ended(p.P0_29.reborrow()); // 45Y / 5
     let mut channel_configs = [
-        //keyset0_channel_config,
-        //keyset1_channel_config,
-        //keyset2_channel_config,
+        keyset0_channel_config,
+        keyset1_channel_config,
+        keyset2_channel_config,
         keyset3_channel_config,
-        //keyset4_channel_config,
-        //keyset5_channel_config,
+        keyset4_channel_config,
+        keyset5_channel_config,
     ];
     for config in channel_configs.iter_mut() {
         config.reference = saadc::Reference::VDD1_4;
@@ -216,76 +219,110 @@ async fn main(_spawner: Spawner) {
     mux_b.set_high();
     Timer::after(Duration::from_millis(10)).await;
 
-    let khz_sampling: usize = 200;
-    let divisor = (16_000_000 / (khz_sampling * 1000)) as u16;
+    // enable all the muxes 
+    for mux in muxens.iter_mut() {
+        mux.set_low();
+    }
+    Timer::after(Duration::from_millis(100)).await; // let things settle
 
-    defmt::info!("running sampler continuous @ {} kHz", khz_sampling);
-    let mut bufs = [[[0; 1]; 10000]; 2];
-    adc.run_timer_sampler::<u8, _, _>(&mut bufs, divisor, |_buf| {
-        saadc::CallbackResult::Stop
-    }).await;
-
-    defmt::info!("finished prerun sampler");
-    defmt::info!("bufspre:{:?}", &bufs[0]);
-
-    muxen23.set_low();
-    Timer::after(Duration::from_millis(100)).await;
-
-
-    // adc
-    //     .run_task_sampler(
-    //         p.TIMER0.reborrow(),
-    //         p.PPI_CH0.reborrow(),
-    //         p.PPI_CH1.reborrow(),
-    //         timer::Frequency::F1MHz,
-    //         1000, // this yields 1 khz
-    //         &mut bufs,
-    //         |_buf| {
-    //             muxen01.set_low();
-    //             i+=1;
-    //             if i >= 1 { saadc::CallbackResult::Stop } else { saadc::CallbackResult::Continue }
-    //         },
-    //     )
-    //     .await;
-    //self.run_sampler(bufs, Some(sample_rate_divisor), || {}, sampler).await;
 
     defmt::info!("starting loop");
 
-    pwm.set_all_duties([
-        DutyCycle::normal(0),
-        DutyCycle::normal(100),
-        DutyCycle::normal(100),
-        DutyCycle::normal(0),
-    ]);
     
+    let mut leds = [smart_leds::RGB8::new(0, 0, 0); N_KEYS];
+    let mut smoothed_val: f32 = 2300.;
+    let mut keyval: f32 = 0.5;
+    let mut keymin = 2250f32;
+    let mut keymax = 2310f32; 
+    let mut min_max = keymax;
+    let mut max_min = keymin;
+    let mut pressed: bool = false;
     loop {
-        let mut output_buffer = [[[0i16; 1]; 10000]; 8];
+        let mut bufs = [[[0; 6]; 100]; 2];
 
-        let mut start_sequence_time = [Instant::now() ; 8];
+        adc
+        .run_task_sampler(
+            p.TIMER0.reborrow(),
+            p.PPI_CH0.reborrow(),
+            p.PPI_CH1.reborrow(),
+            Frequency::F1MHz,
+            100, // gives us 10KHz
+            &mut bufs,
+            move |_buf| { saadc::CallbackResult::Stop },
+        )
+        .await;
 
-        for i in 0..8 {
-            start_sequence_time[i] = Instant::now();
-            adc.run_timer_sampler::<u8, _, _>(&mut bufs, divisor, |_buf| {
-                saadc::CallbackResult::Stop
-            }).await;
-            output_buffer[i].copy_from_slice(&bufs[0]);
+        for samplei in 0..bufs[0].len() {
+            smoothed_val = update_smooth(bufs[0][samplei][3], smoothed_val);
+            keyval = update_keyval(smoothed_val, &mut keymin, &mut keymax, &mut min_max, &mut max_min);
+            //defmt::info!("k,s,mi,mx:[{},{},{},{}]", keyval, smoothed_val, keymin, keymax);
         }
-        pwm.set_all_duties([
-            DutyCycle::normal(100),
-            DutyCycle::normal(100),
-            DutyCycle::normal(0),
-            DutyCycle::normal(0),
-        ]);
-        for i in 0..8 {
-            defmt::info!("Sample set {} took us={}", i, start_sequence_time[i].as_micros());
+        defmt::info!("k,s,mi,mx:[{},{},{},{}]", keyval, smoothed_val, keymin, keymax);
+        if pressed {
+            if keyval > 0.5+SCHMIDT_THRESHOLD {
+                pressed = false;
+            }
+        } else {
+            if keyval < 0.5-SCHMIDT_THRESHOLD {
+                pressed = true;
+            }
         }
-        defmt::info!("bufs:{:?}", &output_buffer);
 
-        pwm.set_all_duties([
-            DutyCycle::normal(0),
-            DutyCycle::normal(100),
-            DutyCycle::normal(100),
-            DutyCycle::normal(0),
-        ]);
+        let rgb: Srgb = Hsv::new(keyval*270f32, 1f32, 0.1f32).into_color();
+        let rgb: Srgb<u8> = rgb.into_format();
+        leds[14] = smart_leds::RGB8::new(rgb.red, rgb.green, rgb.blue);
+        keyleds
+            .write(leds.clone())
+            .expect("couldn't turn on key leds");
+
+        if pressed {
+            // cyan
+            pwm.set_all_duties([
+                DutyCycle::normal(100),
+                DutyCycle::normal(50),
+                DutyCycle::normal(0),
+                DutyCycle::normal(0),
+            ]);
+        } else {
+            // orange
+            pwm.set_all_duties([
+                DutyCycle::normal(0),
+                DutyCycle::normal(100),
+                DutyCycle::normal(100),
+                DutyCycle::normal(0),
+            ]);
+        }
     }
+}
+
+const ALPHA: f32 = 0.05f32;
+fn update_smooth(adc_reading: i16, previous: f32) -> f32 {
+    (1f32-ALPHA)*previous + ALPHA*(adc_reading as f32)
+}
+const RELAXATION_RATE: f32 = 0.001f32;
+const RELAXATION_MAX_FRAC: f32 = 0.2f32;
+fn update_keyval(smoothed_val: f32, min_val: &mut f32, max_val: &mut f32, min_max: &mut f32, max_min: &mut f32) -> f32 {
+    let range = *max_val - *min_val;
+    if smoothed_val < *min_val {
+        *min_val = smoothed_val;
+        *max_min = smoothed_val + range * RELAXATION_MAX_FRAC;
+    } else if *min_val < *max_min {
+        *min_val += RELAXATION_RATE;
+    }
+    if smoothed_val > *max_val {
+        *max_val = smoothed_val;
+        *min_max = smoothed_val - range * RELAXATION_MAX_FRAC;
+    } else if *max_val > *min_max {
+        *max_val -= RELAXATION_RATE;
+    }
+
+    let result = (smoothed_val - *min_val) / range;
+    if result < 0.0 {
+        0.0
+    } else if result > 1.0 {
+        1.0
+    } else {
+        result
+    }
+
 }
