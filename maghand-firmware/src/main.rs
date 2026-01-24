@@ -237,6 +237,7 @@ async fn main(_spawner: Spawner) {
     let mut min_max = keymax;
     let mut max_min = keymin;
     let mut pressed: bool = false;
+    let mut sv2: f32 = 2000.;
     loop {
         let mut bufs = [[[0; 6]; 100]; 2];
 
@@ -248,7 +249,9 @@ async fn main(_spawner: Spawner) {
             Frequency::F1MHz,
             100, // gives us 10KHz
             &mut bufs,
-            move |_buf| { saadc::CallbackResult::Stop },
+            move |_buf| { 
+                saadc::CallbackResult::Stop 
+            },
         )
         .await;
 
@@ -256,8 +259,9 @@ async fn main(_spawner: Spawner) {
             smoothed_val = update_smooth(bufs[0][samplei][3], smoothed_val);
             keyval = update_keyval(smoothed_val, &mut keymin, &mut keymax, &mut min_max, &mut max_min);
             //defmt::info!("k,s,mi,mx:[{},{},{},{}]", keyval, smoothed_val, keymin, keymax);
+            sv2 = update_smooth(bufs[0][samplei][1], sv2);
         }
-        defmt::info!("k,s,mi,mx:[{},{},{},{}]", keyval, smoothed_val, keymin, keymax);
+        defmt::info!("k,s,mi,mx,sc2:[{},{},{},{},{}]", keyval, smoothed_val, keymin, keymax, sv2);
         if pressed {
             if keyval > 0.5+SCHMIDT_THRESHOLD {
                 pressed = false;
