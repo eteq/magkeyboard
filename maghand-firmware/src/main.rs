@@ -129,7 +129,6 @@ async fn main(spawner: Spawner) {
     vhi_off(&mut vhi_pin); // should be the default state, but just in case
 
     // setup board LEDs using PWM - note these are active *low*, so idle level is high
-    // power usage with no leds in is ~0.9 mA
     let mut pwm_config = embassy_nrf::pwm::SimpleConfig::default();
     // not much visible difference between standard and high drive on the board LEDs... but high drive seems to give *less* power usage...
     pwm_config.ch0_drive = OutputDrive::HighDrive;
@@ -299,11 +298,6 @@ async fn main(spawner: Spawner) {
             .expect("couldn't write key led colors");
 
         Timer::after_millis(1).await;
-
-        // defmt_info_key_values().await;
-        // {
-        //     defmt::info!("adc loop time: {} us", (*LAST_ADC_LOOP_TIME.lock().await).as_micros());
-        // }
     }
 }
 
@@ -358,14 +352,8 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     let keyname = (chan*10) as u8 + muxsetting.index();
                     let keyindex = *key_index_map.get(&keyname).expect("couldn't find key in index map");
 
-                    //let report = chan==0 && muxsetting.a==Level::Low && muxsetting.b==Level::Low;
-                    let report = keyname==32;
-
                     for samp in data.iter() {
                         keys[keyindex].update_value_adc((*samp)[chan]);
-                        // if report {
-                        //     defmt::info!("key {} adc,value: {},{}", keyname, (*samp)[chan], keys[keyindex].value.unwrap_or(-1.0));
-                        // }
                     }
                 }
             }
