@@ -279,7 +279,6 @@ async fn main(spawner: Spawner) {
     let keys_mutex = KEYS_MUTEX_LAZY.get();
     let key_index_map = make_key_index_map().await;
     loop {
-        defmt_info_key_values().await;
         let mut ledcolors = [noswitch_color; N_KEYS];
         {
             // not sure if this inner scope is necessary, but seems clearer
@@ -299,16 +298,19 @@ async fn main(spawner: Spawner) {
             .write(ledcolors.iter().cloned())
             .expect("couldn't write key led colors");
 
-        Timer::after_millis(20).await;
+        Timer::after_millis(1).await;
+
+        // defmt_info_key_values().await;
+        // {
+        //     defmt::info!("adc loop time: {} us", (*LAST_ADC_LOOP_TIME.lock().await).as_micros());
+        // }
     }
 }
 
-
-// 12.5 usec (10+2.5) with 6 channels per sample = 75 usec per full channel sample = 13.33333 kHz.
-// so lets to 10 kHz for a bit of margin
-// sample rate is then 10 kHz / 6 channels / 4 mux settings / NSAMP = 24 msec for NSAMP=10
+// 12.5 usec (10+2.5) is 80 kHz sample rate
+// sample rate is then 80 kHz / 6 channels / 4 mux settings / NSAMP = 5 msec for NSAMP=25
 const NCHAN: usize = 6;
-const NSAMP: usize = 10;
+const NSAMP: usize = 25;
 #[embassy_executor::task]
 async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>, 
                      mut timer: Peri<'static, peripherals::TIMER0>, 
@@ -337,7 +339,7 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     timer.reborrow(),
                     ppi1.reborrow(),
                     ppi2.reborrow(),
-                    Frequency::F1MHz,
+                    Frequency::F8MHz,
                     100, 
                     &mut bufs,
                     move |buf| {
@@ -356,8 +358,14 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     let keyname = (chan*10) as u8 + muxsetting.index();
                     let keyindex = *key_index_map.get(&keyname).expect("couldn't find key in index map");
 
+                    //let report = chan==0 && muxsetting.a==Level::Low && muxsetting.b==Level::Low;
+                    let report = keyname==32;
+
                     for samp in data.iter() {
                         keys[keyindex].update_value_adc((*samp)[chan]);
+                        // if report {
+                        //     defmt::info!("key {} adc,value: {},{}", keyname, (*samp)[chan], keys[keyindex].value.unwrap_or(-1.0));
+                        // }
                     }
                 }
             }
