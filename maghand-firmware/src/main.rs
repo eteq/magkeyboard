@@ -4,16 +4,26 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
+use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
+use embassy_time::{Duration, Timer, Instant};
 use embassy_nrf::timer::Frequency;
-use embassy_time::{Duration, Timer};
+use embedded_hal::digital::OutputPin;
 use static_cell::ConstStaticCell;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::lazy_lock::LazyLock;
 use {defmt_rtt as _, panic_probe as _};
+
+use heapless::index_map::FnvIndexMap;
 
 use palette::{Hsv, IntoColor, Srgb};
 
 use smart_leds::SmartLedsWrite;
 use ws2812_spi::Ws2812;
+
+mod keys;
+mod hardware_consts;
+use hardware_consts::*;
 
 
 // alloc only needed for lsm6ds3tr crate.  Might not be worth that.
@@ -22,10 +32,24 @@ use embedded_alloc::LlffHeap as Heap;
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
+// static sync structures
+static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey; N_KEYS]>> = LazyLock::new(
+    || Mutex::new(
+        core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i]))
+    )
+);
+static LAST_ADC_LOOP_TIME: Mutex<ThreadModeRawMutex, Duration> = Mutex::new(Duration::from_millis(0));
 
-const N_KEYS: usize = 24;
-const LED_POWERUP_TIME: Duration = Duration::from_millis(1); // this is just a guess - implicitly it's everything connected to vhi
-const IMU_POWERUP_TIME: Duration = Duration::from_millis(35); // lsm6ds3tr datasheet
+
+async fn make_key_index_map() -> FnvIndexMap<u8, usize, 32> {
+    let keys = KEYS_MUTEX_LAZY.get().lock().await;
+    let mut keys_to_index: FnvIndexMap<u8, usize, 32> = Default::default();
+    for (i, key) in keys.iter().enumerate() {
+        keys_to_index.insert(key.keynumber, i).unwrap();
+    }
+    keys_to_index
+}
+
 
 bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
@@ -71,22 +95,34 @@ fn hsv_cycle_ws2812_data(
     data
 }
 
-const SCHMIDT_THRESHOLD: f32 = 0.2f32;
+#[allow(dead_code)]
+async fn defmt_info_key_values() {
+
+        Timer::after(Duration::from_millis(100)).await;
+        let mut vals: [f32; N_KEYS] = Default::default();
+        let mut nvals: [f32; N_KEYS] = Default::default();
+        let mut mxv: [f32; N_KEYS] = Default::default();
+        let mut miv: [f32; N_KEYS] = Default::default();
+        
+        let keys = KEYS_MUTEX_LAZY.get().lock().await;
+        keys.iter().enumerate().for_each(|(i, k)| {
+            vals[i] = k.value.unwrap_or(-1.0);
+            nvals[i] = k.normalized_value().unwrap_or(-1.0);
+            mxv[i] = k.max_value.unwrap_or(-1.0);
+            miv[i] = k.min_value.unwrap_or(-1.0);
+        });
+
+        defmt::info!("key values,normed,max,min : {:?} : {:?} : {:?} : {:?}", vals, nvals, mxv, miv);
+}
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let mut nrf_config = embassy_nrf::config::Config::default();
     nrf_config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     nrf_config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
     //nrf_config.dcdc = embassy_nrf::config::DcdcConfig {reg0: false, reg1:true, reg0_voltage: None}; // TODO: decide if dc/dc is worth it in vusb or battery mode
     let mut p = embassy_nrf::init(nrf_config);
 
-    // setup UART for comms
-    // let mut uarte_config = uarte::Config::default();
-    // uarte_config.parity = uarte::Parity::EXCLUDED;
-    // uarte_config.baudrate = uarte::Baudrate::BAUD115200;
-
-    // let mut uart = uarte::Uarte::new(p.UARTE0, p.P1_05, p.P1_03, Irqs, uarte_config);
 
     // setup vhi gpio
     let mut vhi_pin = Flex::new(p.P1_12);
@@ -127,7 +163,7 @@ async fn main(_spawner: Spawner) {
     keyleds
         .write([smart_leds::RGB8::new(1, 0, 1); N_KEYS].iter().cloned())
         .expect("couldn't blink key leds");
-    Timer::after(Duration::from_millis(100)).await;
+    Timer::after(Duration::from_millis(50)).await;
     keyleds
         .write([smart_leds::RGB8::new(0, 0, 0); N_KEYS].iter().cloned())
         .expect("couldn't clear key leds");
@@ -203,13 +239,13 @@ async fn main(_spawner: Spawner) {
     saadc_config.resolution = saadc::Resolution::_12BIT;
     saadc_config.oversample = saadc::Oversample::BYPASS;
 
-    let mut adc = saadc::Saadc::new(p.SAADC, Irqs, saadc_config, channel_configs);
+    let adc = saadc::Saadc::new(p.SAADC, Irqs, saadc_config, channel_configs);
     adc.calibrate().await;
 
     //green LED on to indicate setup complete
     pwm.set_all_duties([
         DutyCycle::normal(0),
-        DutyCycle::normal(255),
+        DutyCycle::normal(100),
         DutyCycle::normal(0),
         DutyCycle::normal(0),
     ]);
@@ -228,105 +264,108 @@ async fn main(_spawner: Spawner) {
 
     defmt::info!("starting loop");
 
-    
-    let mut leds = [smart_leds::RGB8::new(0, 0, 0); N_KEYS];
-    let mut smoothed_val: f32 = 2300.;
-    let mut keyval: f32 = 0.5;
-    let mut keymin = 2250f32;
-    let mut keymax = 2310f32; 
-    let mut min_max = keymax;
-    let mut max_min = keymin;
-    let mut pressed: bool = false;
-    let mut sv2: f32 = 2000.;
+    spawner.spawn(adc_sampler(adc, 
+                              p.TIMER0, 
+                              p.PPI_CH0,
+                              p.PPI_CH1,
+                              mux_a,
+                              mux_b)).expect("failed to spawn adc sampler");
+
+
+    let noswitch_color = smart_leds::RGB8::new(5u8, 0u8, 0u8);
+    let switch_on_color = smart_leds::RGB8::new(0u8, 5u8, 0u8);
+    let switch_off_color = smart_leds::RGB8::new(0u8, 0u8, 5u8);
+
+    let keys_mutex = KEYS_MUTEX_LAZY.get();
+    let key_index_map = make_key_index_map().await;
     loop {
-        let mut bufs = [[[0; 6]; 100]; 2];
-
-        adc
-        .run_task_sampler(
-            p.TIMER0.reborrow(),
-            p.PPI_CH0.reborrow(),
-            p.PPI_CH1.reborrow(),
-            Frequency::F1MHz,
-            100, // gives us 10KHz
-            &mut bufs,
-            move |_buf| { 
-                saadc::CallbackResult::Stop 
-            },
-        )
-        .await;
-
-        for samplei in 0..bufs[0].len() {
-            smoothed_val = update_smooth(bufs[0][samplei][3], smoothed_val);
-            keyval = update_keyval(smoothed_val, &mut keymin, &mut keymax, &mut min_max, &mut max_min);
-            //defmt::info!("k,s,mi,mx:[{},{},{},{}]", keyval, smoothed_val, keymin, keymax);
-            sv2 = update_smooth(bufs[0][samplei][1], sv2);
-        }
-        defmt::info!("k,s,mi,mx,sc2:[{},{},{},{},{}]", keyval, smoothed_val, keymin, keymax, sv2);
-        if pressed {
-            if keyval > 0.5+SCHMIDT_THRESHOLD {
-                pressed = false;
+        defmt_info_key_values().await;
+        let mut ledcolors = [noswitch_color; N_KEYS];
+        {
+            // not sure if this inner scope is necessary, but seems clearer
+            for k in keys_mutex.lock().await.iter() {
+                if let Some(ison) = k.is_on() {
+                    let keyindex = *key_index_map.get(&k.keynumber).expect("couldn't find key in index map");
+                    if ison {
+                        ledcolors[keyindex] = switch_on_color;
+                    } else {
+                        ledcolors[keyindex] = switch_off_color;
+                    }
+                }
             }
-        } else {
-            if keyval < 0.5-SCHMIDT_THRESHOLD {
-                pressed = true;
-            }
-        }
 
-        let rgb: Srgb = Hsv::new(keyval*270f32, 1f32, 0.1f32).into_color();
-        let rgb: Srgb<u8> = rgb.into_format();
-        leds[14] = smart_leds::RGB8::new(rgb.red, rgb.green, rgb.blue);
+        }
         keyleds
-            .write(leds.clone())
-            .expect("couldn't turn on key leds");
+            .write(ledcolors.iter().cloned())
+            .expect("couldn't write key led colors");
 
-        if pressed {
-            // cyan
-            pwm.set_all_duties([
-                DutyCycle::normal(100),
-                DutyCycle::normal(50),
-                DutyCycle::normal(0),
-                DutyCycle::normal(0),
-            ]);
-        } else {
-            // orange
-            pwm.set_all_duties([
-                DutyCycle::normal(0),
-                DutyCycle::normal(100),
-                DutyCycle::normal(100),
-                DutyCycle::normal(0),
-            ]);
+        Timer::after_millis(20).await;
+    }
+}
+
+
+// 12.5 usec (10+2.5) with 6 channels per sample = 75 usec per full channel sample = 13.33333 kHz.
+// so lets to 10 kHz for a bit of margin
+// sample rate is then 10 kHz / 6 channels / 4 mux settings / NSAMP = 24 msec for NSAMP=10
+const NCHAN: usize = 6;
+const NSAMP: usize = 10;
+#[embassy_executor::task]
+async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>, 
+                     mut timer: Peri<'static, peripherals::TIMER0>, 
+                     mut ppi1: Peri<'static, peripherals::PPI_CH0>, 
+                     mut ppi2: Peri<'static, peripherals::PPI_CH1>,
+                     mut mux_a: Output<'static>,
+                     mut mux_b: Output<'static>,) {
+
+    let keys_mutex = KEYS_MUTEX_LAZY.get();
+    let key_index_map = make_key_index_map().await;
+    
+    let mut bufs = [[[0; NCHAN]; NSAMP]; 2];
+    let bufs_inner_size = bufs[0].len();
+
+    loop {
+        let startloop = Instant::now();
+        for muxsetting in keys::MuxSpec::iterator() {
+            mux_a.set_level(muxsetting.a);
+            mux_b.set_level(muxsetting.b);
+            if let Some(settle_time) = MUX_SETTLE_TIME {
+                Timer::after(settle_time).await;
+            }
+
+            adc
+                .run_task_sampler(
+                    timer.reborrow(),
+                    ppi1.reborrow(),
+                    ppi2.reborrow(),
+                    Frequency::F1MHz,
+                    100, 
+                    &mut bufs,
+                    move |buf| {
+                        if buf.len() !=  bufs_inner_size {
+                            defmt::warn!("adc buffer size mismatch: {} != {}", buf.len(), bufs_inner_size);
+                        }
+                        saadc::CallbackResult::Stop
+                    },
+                ).await;
+
+            let data = bufs[0];
+            {  // scope for locking mutex
+                let mut keys = keys_mutex.lock().await;
+
+                for chan in 0..NCHAN {
+                    let keyname = (chan*10) as u8 + muxsetting.index();
+                    let keyindex = *key_index_map.get(&keyname).expect("couldn't find key in index map");
+
+                    for samp in data.iter() {
+                        keys[keyindex].update_value_adc((*samp)[chan]);
+                    }
+                }
+            }
+                }
+        let loopdur = startloop.elapsed();
+        {
+            LAST_ADC_LOOP_TIME.lock().await.clone_from(&loopdur);
         }
+        
     }
-}
-
-const ALPHA: f32 = 0.05f32;
-fn update_smooth(adc_reading: i16, previous: f32) -> f32 {
-    (1f32-ALPHA)*previous + ALPHA*(adc_reading as f32)
-}
-const RELAXATION_RATE: f32 = 0.001f32;
-const RELAXATION_MAX_FRAC: f32 = 0.2f32;
-fn update_keyval(smoothed_val: f32, min_val: &mut f32, max_val: &mut f32, min_max: &mut f32, max_min: &mut f32) -> f32 {
-    let range = *max_val - *min_val;
-    if smoothed_val < *min_val {
-        *min_val = smoothed_val;
-        *max_min = smoothed_val + range * RELAXATION_MAX_FRAC;
-    } else if *min_val < *max_min {
-        *min_val += RELAXATION_RATE;
-    }
-    if smoothed_val > *max_val {
-        *max_val = smoothed_val;
-        *min_max = smoothed_val - range * RELAXATION_MAX_FRAC;
-    } else if *max_val > *min_max {
-        *max_val -= RELAXATION_RATE;
-    }
-
-    let result = (smoothed_val - *min_val) / range;
-    if result < 0.0 {
-        0.0
-    } else if result > 1.0 {
-        1.0
-    } else {
-        result
-    }
-
 }
