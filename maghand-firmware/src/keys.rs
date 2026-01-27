@@ -1,7 +1,16 @@
 use embassy_nrf::gpio::Level;
+use embassy_sync::channel::Sender;
+use embassy_sync::blocking_mutex::raw::RawMutex;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct AnalogKey {
+#[derive(Debug, Clone, Copy)]
+pub struct KeySignal {
+    pub toggle_on: bool,
+    pub keynumber: u8,
+}
+
+#[derive(Debug)]
+pub struct AnalogKey<M:RawMutex + 'static, const N: usize> 
+{
     pub keynumber: u8,  // the "name" of the key - might not be sequential
     pub value: Option<f32>, // the most recent smoothed analog reading for this key
     pub filter_alpha: f32,
@@ -11,11 +20,12 @@ pub struct AnalogKey {
     pub switch_hysteresis_fraction: f32,
     pub high_is_on: bool,
     pub norm_valid_range: f32,
+    pub toggle_channel: Option<Sender<'static, M, KeySignal, N>>,
 
 } 
 
-impl AnalogKey {
-    pub fn new(keynumber: u8) -> Self {
+impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
+    pub fn new(keynumber: u8, toggle_channel: Option<Sender<'static, M, KeySignal, N>>) -> Self {
         AnalogKey {
             keynumber: keynumber,
             value: None,
@@ -26,9 +36,12 @@ impl AnalogKey {
             switch_hysteresis_fraction: 0.1,
             high_is_on: false,
             norm_valid_range: 100.,
+            toggle_channel: toggle_channel,
         }
     }
     pub fn update_value_adc(&mut self, new_adc_value: i16) {
+        let oldon = self.is_on();
+
         if let Some(oldval) = self.value {
             let newval = (1. - self.filter_alpha) * oldval + self.filter_alpha * (new_adc_value as f32);
 
@@ -59,6 +72,27 @@ impl AnalogKey {
         } else {
             self.value = Some(new_adc_value as f32);
         }
+
+        let newon = self.is_on();
+        match (oldon, newon) {
+            (Some(old), Some(new)) if old != new => {
+                self.toggled(new);
+            }
+            _ => {}
+        }
+    }
+
+    fn toggled(&self, to_on: bool) {
+        match &self.toggle_channel {
+            Some(sender) => {
+                let signal = KeySignal {
+                    toggle_on: to_on,
+                    keynumber: self.keynumber,
+                };
+                sender.try_send(signal).expect("send buffer filled, ahhhh!");
+            }
+            None => {}
+        }
     }
 
     pub fn normalized_value(&self) -> Option<f32> {
@@ -87,8 +121,8 @@ impl AnalogKey {
     }
 }
 
-impl Default for AnalogKey {
-    fn default() -> Self { AnalogKey::new(0) }
+impl<M: RawMutex, const N: usize> Default for AnalogKey<M, N> {
+    fn default() -> Self { AnalogKey::<M,N>::new(0, None) }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

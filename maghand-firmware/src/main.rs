@@ -12,6 +12,7 @@ use static_cell::ConstStaticCell;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
+use embassy_sync::channel::Channel;
 use {defmt_rtt as _, panic_probe as _};
 
 use heapless::index_map::FnvIndexMap;
@@ -33,9 +34,11 @@ use embedded_alloc::LlffHeap as Heap;
 static HEAP: Heap = Heap::empty();
 
 // static sync structures
-static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey; N_KEYS]>> = LazyLock::new(
+const N_CHANNEL_BUFFER: usize = 32;
+static CHANNEL: Channel<ThreadModeRawMutex, keys::KeySignal, N_CHANNEL_BUFFER> = Channel::new();
+static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey<ThreadModeRawMutex, N_CHANNEL_BUFFER>; N_KEYS]>> = LazyLock::new(
     || Mutex::new(
-        core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i]))
+        core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i], Some(CHANNEL.sender())))
     )
 );
 static LAST_ADC_LOOP_TIME: Mutex<ThreadModeRawMutex, Duration> = Mutex::new(Duration::from_millis(0));
@@ -271,33 +274,10 @@ async fn main(spawner: Spawner) {
                               mux_b)).expect("failed to spawn adc sampler");
 
 
-    let noswitch_color = smart_leds::RGB8::new(5u8, 0u8, 0u8);
-    let switch_on_color = smart_leds::RGB8::new(0u8, 5u8, 0u8);
-    let switch_off_color = smart_leds::RGB8::new(0u8, 0u8, 5u8);
-
-    let keys_mutex = KEYS_MUTEX_LAZY.get();
-    let key_index_map = make_key_index_map().await;
+    let key_receiver = CHANNEL.receiver();
     loop {
-        let mut ledcolors = [noswitch_color; N_KEYS];
-        {
-            // not sure if this inner scope is necessary, but seems clearer
-            for k in keys_mutex.lock().await.iter() {
-                if let Some(ison) = k.is_on() {
-                    let keyindex = *key_index_map.get(&k.keynumber).expect("couldn't find key in index map");
-                    if ison {
-                        ledcolors[keyindex] = switch_on_color;
-                    } else {
-                        ledcolors[keyindex] = switch_off_color;
-                    }
-                }
-            }
-
-        }
-        keyleds
-            .write(ledcolors.iter().cloned())
-            .expect("couldn't write key led colors");
-
-        Timer::after_millis(1).await;
+        let toggle_data = key_receiver.receive().await;
+        defmt::info!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
     }
 }
 
