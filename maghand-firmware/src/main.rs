@@ -17,8 +17,6 @@ use {defmt_rtt as _, panic_probe as _};
 
 use heapless::index_map::FnvIndexMap;
 
-use palette::{Hsv, IntoColor, Srgb};
-
 use smart_leds::SmartLedsWrite;
 use ws2812_spi::Ws2812;
 
@@ -70,53 +68,6 @@ fn vhi_off(vhi_pin: &mut Flex) {
     vhi_pin.set_as_input(Pull::None);
 }
 
-#[allow(dead_code)]
-fn hsv_on_board_leds(pwm: &mut pwm::SimplePwm, h: f32, s: f32, v: f32) {
-    let rgb: Srgb = Hsv::new(h, s, v).into_color();
-    let rgb: Srgb<u8> = rgb.into_format();
-
-    let r_duty = DutyCycle::normal(rgb.red as u16);
-    let g_duty = DutyCycle::normal(rgb.green as u16);
-    let b_duty = DutyCycle::normal(rgb.blue as u16);
-    pwm.set_all_duties([r_duty, g_duty, b_duty, DutyCycle::normal(0)]);
-}
-
-#[allow(dead_code)]
-fn hsv_cycle_ws2812_data(
-    phase: f32,
-    s: f32,
-    v: f32,
-    fracrainbow: f32,
-) -> [smart_leds::RGB8; N_KEYS] {
-    let mut data = [smart_leds::RGB8::default(); N_KEYS];
-    for (i, led) in data.iter_mut().enumerate() {
-        let h = ((i as f32) / (N_KEYS as f32) * fracrainbow + phase) % 1.0 * 360.;
-        let rgb: Srgb = Hsv::new(h, s, v).into_color();
-        let rgb: Srgb<u8> = rgb.into_format();
-        *led = smart_leds::RGB8::new(rgb.red, rgb.green, rgb.blue);
-    }
-    data
-}
-
-#[allow(dead_code)]
-async fn defmt_info_key_values() {
-
-        Timer::after(Duration::from_millis(100)).await;
-        let mut vals: [f32; N_KEYS] = Default::default();
-        let mut nvals: [f32; N_KEYS] = Default::default();
-        let mut mxv: [f32; N_KEYS] = Default::default();
-        let mut miv: [f32; N_KEYS] = Default::default();
-        
-        let keys = KEYS_MUTEX_LAZY.get().lock().await;
-        keys.iter().enumerate().for_each(|(i, k)| {
-            vals[i] = k.value.unwrap_or(-1.0);
-            nvals[i] = k.normalized_value().unwrap_or(-1.0);
-            mxv[i] = k.max_value.unwrap_or(-1.0);
-            miv[i] = k.min_value.unwrap_or(-1.0);
-        });
-
-        defmt::info!("key values,normed,max,min : {:?} : {:?} : {:?} : {:?}", vals, nvals, mxv, miv);
-}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
