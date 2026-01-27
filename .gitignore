@@ -6,4 +6,4 @@ gerbers*
 *.swp
 
 # testing data conventional name
-magtest*
+testdata
