@@ -5,7 +5,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
 use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
-use embassy_time::{Duration, Timer, Instant};
+use embassy_time::{Duration, Timer};
 use embassy_nrf::timer::Frequency;
 use embedded_hal::digital::OutputPin;
 use static_cell::ConstStaticCell;
@@ -39,7 +39,6 @@ static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey<Thre
         core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i], Some(CHANNEL.sender())))
     )
 );
-static LAST_ADC_LOOP_TIME: Mutex<ThreadModeRawMutex, Duration> = Mutex::new(Duration::from_millis(0));
 
 
 async fn make_key_index_map() -> FnvIndexMap<u8, usize, 32> {
@@ -215,7 +214,7 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(100)).await; // let things settle
 
 
-    defmt::info!("starting loop");
+    defmt::debug!("starting loop");
 
     spawner.spawn(adc_sampler(adc, 
                               p.TIMER0, 
@@ -228,7 +227,7 @@ async fn main(spawner: Spawner) {
     let key_receiver = CHANNEL.receiver();
     loop {
         let toggle_data = key_receiver.receive().await;
-        defmt::info!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
+        defmt::debug!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
     }
 }
 
@@ -251,7 +250,6 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
     let bufs_inner_size = bufs[0].len();
 
     loop {
-        let startloop = Instant::now();
         for muxsetting in keys::MuxSpec::iterator() {
             mux_a.set_level(muxsetting.a);
             mux_b.set_level(muxsetting.b);
@@ -289,10 +287,6 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                 }
             }
                 }
-        let loopdur = startloop.elapsed();
-        {
-            LAST_ADC_LOOP_TIME.lock().await.clone_from(&loopdur);
-        }
         
     }
 }
