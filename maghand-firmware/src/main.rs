@@ -5,7 +5,7 @@ use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
 use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, Instant};
 use embassy_nrf::timer::Frequency;
 use embedded_hal::digital::OutputPin;
 use static_cell::ConstStaticCell;
@@ -286,7 +286,6 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     }
                 }
             }
-                }
-        
+        } 
     }
 }
