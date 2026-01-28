@@ -44,3 +44,7 @@ opt-level = 'z'
 debug = 2
 lto = true
 opt-level = "z"
+
+[features]
+# enables adc value output on defmt debug channel
+adc_debug = []

@@ -234,7 +234,7 @@ async fn main(spawner: Spawner) {
 // 12.5 usec (10+2.5) is 80 kHz sample rate
 // sample rate is then 80 kHz / 6 channels / 4 mux settings / NSAMP = 5 msec for NSAMP=25
 const NCHAN: usize = 6;
-const NSAMP: usize = 25;
+const NSAMP: usize = 256;
 #[embassy_executor::task]
 async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>, 
                      mut timer: Peri<'static, peripherals::TIMER0>, 
@@ -249,6 +249,9 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
     let mut bufs = [[[0; NCHAN]; NSAMP]; 2];
     let bufs_inner_size = bufs[0].len();
 
+    #[cfg(feature = "adc_debug")]
+    let mut debug_key_index: usize = 0;
+
     loop {
         for muxsetting in keys::MuxSpec::iterator() {
             mux_a.set_level(muxsetting.a);
@@ -256,6 +259,9 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
             if let Some(settle_time) = MUX_SETTLE_TIME {
                 Timer::after(settle_time).await;
             }
+
+            #[cfg(feature = "adc_debug")]
+            let adcstart = Instant::now();
 
             adc
                 .run_task_sampler(
@@ -273,6 +279,9 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     },
                 ).await;
 
+             #[cfg(feature = "adc_debug")]
+            let adcend = Instant::now();
+
             let data = bufs[0];
             {  // scope for locking mutex
                 let mut keys = keys_mutex.lock().await;
@@ -284,8 +293,23 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                     for samp in data.iter() {
                         keys[keyindex].update_value_adc((*samp)[chan]);
                     }
+
+                    #[cfg(feature = "adc_debug")]
+                    if keyindex == debug_key_index {
+                        let mut values = [0i16; NSAMP];
+                        for (i, samp) in data.iter().enumerate() {
+                            values[i] = (*samp)[chan];
+                        }
+                        defmt::debug!("Key: {}; adctime us: {},{}; values: {}", 
+                                      keyname, adcstart.as_micros(), adcend.as_micros(), values);
+                    }
                 }
             }
-        } 
+        }
+
+
+        #[cfg(feature = "adc_debug")]
+        { debug_key_index = (debug_key_index + 1) % N_KEYS; }
+
     }
 }
