@@ -221,7 +221,10 @@ async fn main(spawner: Spawner) {
     // spawner.spawn(usb_kb::usb_task(p.USBD))
     //     .expect("failed to spawn USB task");
     let usb_driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
-    spawner.spawn(usb_kb::usb_task(usb_driver))
+
+    let key_receiver = CHANNEL.receiver();
+
+    spawner.spawn(usb_kb::usb_task(usb_driver, key_receiver))
         .expect("failed to spawn USB task");
 
     defmt::debug!("starting loop");
@@ -234,10 +237,9 @@ async fn main(spawner: Spawner) {
                               mux_b)).expect("failed to spawn adc sampler");
 
 
-    let key_receiver = CHANNEL.receiver();
     loop {
-        let toggle_data = key_receiver.receive().await;
-        defmt::debug!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
+        // just wait, all the action should happen in usb
+        Timer::after_millis(500).await;
     }
 }
 
@@ -298,20 +300,24 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
 
                 for chan in 0..NCHAN {
                     let keyname = (chan*10) as u8 + muxsetting.index();
-                    let keyindex = *key_index_map.get(&keyname).expect("couldn't find key in index map");
-
-                    for samp in data.iter() {
-                        keys[keyindex].update_value_adc((*samp)[chan]);
-                    }
-
-                    #[cfg(feature = "adc_debug")]
-                    if keyindex == debug_key_index {
-                        let mut values = [0i16; NSAMP];
-                        for (i, samp) in data.iter().enumerate() {
-                            values[i] = (*samp)[chan];
+                    match key_index_map.get(&keyname) {
+                        Some(&keyindex) => {
+                            for samp in data.iter() {
+                                keys[keyindex].update_value_adc((*samp)[chan]);
+                            }
+                            #[cfg(feature = "adc_debug")]
+                            if keyindex == debug_key_index {
+                                let mut values = [0i16; NSAMP];
+                                for (i, samp) in data.iter().enumerate() {
+                                    values[i] = (*samp)[chan];
+                                }
+                                defmt::debug!("Key: {}; adctime us: {},{}; values: {}", 
+                                              keyname, adcstart.as_micros(), adcend.as_micros(), values);
+                            }
                         }
-                        defmt::debug!("Key: {}; adctime us: {},{}; values: {}", 
-                                      keyname, adcstart.as_micros(), adcend.as_micros(), values);
+                        None => {
+                            defmt::trace!("No key found for key name {}", keyname);
+                        }
                     }
                 }
             }
