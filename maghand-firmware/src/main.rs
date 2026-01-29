@@ -4,8 +4,8 @@
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte};
-use embassy_time::{Duration, Timer, Instant};
+use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte, usb};
+use embassy_time::{Duration, Timer};
 use embassy_nrf::timer::Frequency;
 use embedded_hal::digital::OutputPin;
 use static_cell::ConstStaticCell;
@@ -20,9 +20,10 @@ use heapless::index_map::FnvIndexMap;
 use smart_leds::SmartLedsWrite;
 use ws2812_spi::Ws2812;
 
-mod keys;
 mod hardware_consts;
 use hardware_consts::*;
+mod keys;
+mod usb_hid;
 
 
 // alloc only needed for lsm6ds3tr crate.  Might not be worth that.
@@ -56,6 +57,8 @@ bind_interrupts!(struct Irqs {
     UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    USBD => usb::InterruptHandler<peripherals::USBD>;
+    CLOCK_POWER => usb::vbus_detect::InterruptHandler;
 });
 
 fn vhi_on(vhi_pin: &mut Flex) {
@@ -212,6 +215,11 @@ async fn main(spawner: Spawner) {
         mux.set_low();
     }
     Timer::after(Duration::from_millis(100)).await; // let things settle
+
+    // set up USB
+    let usb_driver = usb::Driver::new(p.USBD, Irqs, 
+        usb::vbus_detect::HardwareVbusDetect::new(Irqs));
+    usb_hid::setup(usb_driver);
 
 
     defmt::debug!("starting loop");

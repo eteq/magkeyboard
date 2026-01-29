@@ -20,8 +20,10 @@ embedded-hal-async = "1.0.0"
 cortex-m-rt = "0.7.3"
 
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt", "executor-interrupt"] }
-embassy-sync = { version = "0.7" }
+embassy-sync = { version = "0.7", features = ["defmt"] }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-usb = { version = "0.5.1", features = ["defmt", "usbd-hid"] }
+usbd-hid = "0.8.2"
 
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 embassy-nrf = { version = "0.9", features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time", "nfc-pins-as-gpio"] }
