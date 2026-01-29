@@ -13,6 +13,7 @@ use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::channel::Channel;
+use embassy_futures::join::join;
 use {defmt_rtt as _, panic_probe as _};
 
 use heapless::index_map::FnvIndexMap;
@@ -69,7 +70,6 @@ fn vhi_on(vhi_pin: &mut Flex) {
 fn vhi_off(vhi_pin: &mut Flex) {
     vhi_pin.set_as_input(Pull::None);
 }
-
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -217,10 +217,13 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(100)).await; // let things settle
 
     // set up USB
+    let usb = usb_hid::USBKeyboard::default();
     let usb_driver = usb::Driver::new(p.USBD, Irqs, 
         usb::vbus_detect::HardwareVbusDetect::new(Irqs));
-    usb_hid::setup(usb_driver);
-
+    //usb_hid::setup(usb_driver);
+    //usb.setup(usb_driver);
+    spawner.spawn(usb_task(usb, usb_driver))
+        .expect("failed to spawn USB task");
 
     defmt::debug!("starting loop");
 
@@ -236,6 +239,17 @@ async fn main(spawner: Spawner) {
     loop {
         let toggle_data = key_receiver.receive().await;
         defmt::debug!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
+    }
+}
+
+#[embassy_executor::task]
+pub async fn usb_task(mut usb: usb_hid::USBKeyboard<'static>, driver: usb::Driver<'static, usb::vbus_detect::HardwareVbusDetect>) {
+    //let mut usb = usb_hid::USBKeyboard::default();
+    usb.setup(driver);
+    // The USB device runs here indefinitely
+    loop {
+        let (usb_fut, hid_fut) = usb.get_runners();
+        join(usb_fut, hid_fut).await;
     }
 }
 

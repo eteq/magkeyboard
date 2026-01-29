@@ -23,6 +23,7 @@ embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thr
 embassy-sync = { version = "0.7", features = ["defmt"] }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-usb = { version = "0.5.1", features = ["defmt", "usbd-hid"] }
+embassy-futures = { version = "0.1.2" }
 usbd-hid = "0.8.2"
 
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
