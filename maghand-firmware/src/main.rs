@@ -13,7 +13,8 @@ use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::channel::Channel;
-use embassy_futures::join::join;
+use embassy_nrf::usb::Driver;
+use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use {defmt_rtt as _, panic_probe as _};
 
 use heapless::index_map::FnvIndexMap;
@@ -24,7 +25,7 @@ use ws2812_spi::Ws2812;
 mod hardware_consts;
 use hardware_consts::*;
 mod keys;
-mod usb_hid;
+mod usb_kb;
 
 
 // alloc only needed for lsm6ds3tr crate.  Might not be worth that.
@@ -217,12 +218,10 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(100)).await; // let things settle
 
     // set up USB
-    let usb = usb_hid::USBKeyboard::default();
-    let usb_driver = usb::Driver::new(p.USBD, Irqs, 
-        usb::vbus_detect::HardwareVbusDetect::new(Irqs));
-    //usb_hid::setup(usb_driver);
-    //usb.setup(usb_driver);
-    spawner.spawn(usb_task(usb, usb_driver))
+    // spawner.spawn(usb_kb::usb_task(p.USBD))
+    //     .expect("failed to spawn USB task");
+    let usb_driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    spawner.spawn(usb_kb::usb_task(usb_driver))
         .expect("failed to spawn USB task");
 
     defmt::debug!("starting loop");
@@ -239,17 +238,6 @@ async fn main(spawner: Spawner) {
     loop {
         let toggle_data = key_receiver.receive().await;
         defmt::debug!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
-    }
-}
-
-#[embassy_executor::task]
-pub async fn usb_task(mut usb: usb_hid::USBKeyboard<'static>, driver: usb::Driver<'static, usb::vbus_detect::HardwareVbusDetect>) {
-    //let mut usb = usb_hid::USBKeyboard::default();
-    usb.setup(driver);
-    // The USB device runs here indefinitely
-    loop {
-        let (usb_fut, hid_fut) = usb.get_runners();
-        join(usb_fut, hid_fut).await;
     }
 }
 
