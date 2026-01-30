@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
+use embedded_hal::digital::OutputPin;
+
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
 use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte, usb};
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use embassy_nrf::timer::Frequency;
-use embedded_hal::digital::OutputPin;
-use static_cell::ConstStaticCell;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
@@ -16,6 +16,8 @@ use embassy_sync::channel::Channel;
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use {defmt_rtt as _, panic_probe as _};
+
+use static_cell::ConstStaticCell;
 
 use heapless::index_map::FnvIndexMap;
 
@@ -42,16 +44,13 @@ static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey<Thre
         core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i], Some(CHANNEL.sender())))
     )
 );
-
-
-async fn make_key_index_map() -> FnvIndexMap<u8, usize, 32> {
-    let keys = KEYS_MUTEX_LAZY.get().lock().await;
+static KEY_INDEX_MAP: LazyLock<FnvIndexMap<u8, usize, 32>> = LazyLock::new(|| {
     let mut keys_to_index: FnvIndexMap<u8, usize, 32> = Default::default();
-    for (i, key) in keys.iter().enumerate() {
-        keys_to_index.insert(key.keynumber, i).unwrap();
+    for (i, knm) in KEY_NAMES.iter().enumerate() {
+        keys_to_index.insert(*knm, i).unwrap();
     }
     keys_to_index
-}
+});
 
 
 bind_interrupts!(struct Irqs {
@@ -119,7 +118,7 @@ async fn main(spawner: Spawner) {
     keyleds
         .write([smart_leds::RGB8::new(1, 0, 1); N_KEYS].iter().cloned())
         .expect("couldn't blink key leds");
-    Timer::after(Duration::from_millis(50)).await;
+    Timer::after_millis(50).await;
     keyleds
         .write([smart_leds::RGB8::new(0, 0, 0); N_KEYS].iter().cloned())
         .expect("couldn't clear key leds");
@@ -198,24 +197,17 @@ async fn main(spawner: Spawner) {
     let adc = saadc::Saadc::new(p.SAADC, Irqs, saadc_config, channel_configs);
     adc.calibrate().await;
 
-    //green LED on to indicate setup complete
-    pwm.set_all_duties([
-        DutyCycle::normal(0),
-        DutyCycle::normal(100),
-        DutyCycle::normal(0),
-        DutyCycle::normal(0),
-    ]);
 
     // select key 2 on each channel
     mux_a.set_low();
     mux_b.set_high();
-    Timer::after(Duration::from_millis(10)).await;
+    Timer::after_millis(10).await;
 
     // enable all the muxes 
     for mux in muxens.iter_mut() {
         mux.set_low();
     }
-    Timer::after(Duration::from_millis(100)).await; // let things settle
+    Timer::after_millis(100).await; // let things settle
 
     // set up USB
     // spawner.spawn(usb_kb::usb_task(p.USBD))
@@ -227,7 +219,16 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_kb::usb_task(usb_driver, key_receiver))
         .expect("failed to spawn USB task");
 
-    defmt::debug!("starting loop");
+
+    //green LED on to indicate setup complete
+    pwm.set_all_duties([
+        DutyCycle::normal(0),
+        DutyCycle::normal(100),
+        DutyCycle::normal(0),
+        DutyCycle::normal(0),
+    ]);
+
+    defmt::debug!("starting adc and main loop");
 
     spawner.spawn(adc_sampler(adc, 
                               p.TIMER0, 
@@ -255,14 +256,15 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                      mut mux_a: Output<'static>,
                      mut mux_b: Output<'static>,) {
 
-    let keys_mutex = KEYS_MUTEX_LAZY.get();
-    let key_index_map = make_key_index_map().await;
+    let keys_mutex: &Mutex<ThreadModeRawMutex, [keys::AnalogKey<ThreadModeRawMutex, N_CHANNEL_BUFFER>; N_KEYS]> = KEYS_MUTEX_LAZY.get();
     
     let mut bufs = [[[0; NCHAN]; NSAMP]; 2];
     let bufs_inner_size = bufs[0].len();
 
     #[cfg(feature = "adc_debug")]
     let mut debug_key_index: usize = 0;
+
+    let key_index_map = KEY_INDEX_MAP.get();
 
     loop {
         for muxsetting in keys::MuxSpec::iterator() {

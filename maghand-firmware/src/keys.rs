@@ -1,6 +1,21 @@
 use embassy_nrf::gpio::Level;
 use embassy_sync::channel::Sender;
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::lazy_lock::LazyLock;
+
+use usbd_hid::descriptor::KeyboardUsage;
+
+use heapless::index_map::FnvIndexMap;
+
+use crate::hardware_consts::N_KEYS;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum Layer {
+    Default
+}
+//const N_LAYERS: usize = mem::variant_count::<Layers>(); // not stabilized - https://github.com/rust-lang/rust/issues/73662
+const N_LAYERS: usize = 1;
+
 
 #[derive(Debug, Clone, Copy)]
 pub struct KeySignal {
@@ -21,7 +36,6 @@ pub struct AnalogKey<M:RawMutex + 'static, const N: usize>
     pub high_is_on: bool,
     pub norm_valid_range: f32,
     pub toggle_channel: Option<Sender<'static, M, KeySignal, N>>,
-
 } 
 
 impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
@@ -153,3 +167,35 @@ impl MuxSpec {
 impl Default for MuxSpec {
     fn default() -> Self { MuxSpec { a: Level::Low, b: Level::Low } }
 }
+
+
+const N_KEYMAP: usize = N_KEYS * N_LAYERS;
+const N_KEYMAP_POWEROF2: usize = N_KEYMAP.next_power_of_two();
+pub static KEYMAP: LazyLock<FnvIndexMap<(u8, Layer), KeyboardUsage, N_KEYMAP_POWEROF2>> = LazyLock::new(|| {
+    let mut m = FnvIndexMap::new();
+    m.insert((00, Layer::Default), KeyboardUsage::KeyboardQq).expect("no space for key!");
+    m.insert((01, Layer::Default), KeyboardUsage::KeyboardWw).expect("no space for key!");
+    m.insert((02, Layer::Default), KeyboardUsage::KeyboardEe).expect("no space for key!");
+    m.insert((03, Layer::Default), KeyboardUsage::KeyboardRr).expect("no space for key!");
+    m.insert((10, Layer::Default), KeyboardUsage::KeyboardTt).expect("no space for key!");
+    m.insert((11, Layer::Default), KeyboardUsage::KeypadTab).expect("no space for key!");
+    m.insert((12, Layer::Default), KeyboardUsage::KeyboardAa).expect("no space for key!");
+    m.insert((13, Layer::Default), KeyboardUsage::KeyboardSs).expect("no space for key!");
+    m.insert((20, Layer::Default), KeyboardUsage::KeyboardDd).expect("no space for key!");
+    m.insert((21, Layer::Default), KeyboardUsage::KeyboardFf).expect("no space for key!");
+    m.insert((22, Layer::Default), KeyboardUsage::KeyboardGg).expect("no space for key!");
+    m.insert((23, Layer::Default), KeyboardUsage::KeypadLeftShift).expect("no space for key!");
+    m.insert((30, Layer::Default), KeyboardUsage::KeyboardZz).expect("no space for key!");
+    m.insert((31, Layer::Default), KeyboardUsage::KeyboardXx).expect("no space for key!");
+    m.insert((32, Layer::Default), KeyboardUsage::KeyboardCc).expect("no space for key!");
+    m.insert((33, Layer::Default), KeyboardUsage::KeyboardVv).expect("no space for key!");
+    m.insert((40, Layer::Default), KeyboardUsage::KeyboardBb).expect("no space for key!");
+    m.insert((41, Layer::Default), KeyboardUsage::KeyboardLeftControl).expect("no space for key!");
+    m.insert((42, Layer::Default), KeyboardUsage::KeyboardLeftAlt).expect("no space for key!");
+    //m.insert((43, Layer::Default), KeyboardUsage::Keyboard1<FIX>).expect("no space for key!");
+    //m.insert((50, Layer::Default), KeyboardUsage::Keyboard2<FIX>).expect("no space for key!");
+    m.insert((51, Layer::Default), KeyboardUsage::KeyboardSpacebar).expect("no space for key!");
+    //m.insert((52, Layer::Default), KeyboardUsage::Keyboard3<FIX>).expect("no space for key!");
+
+    m
+});
