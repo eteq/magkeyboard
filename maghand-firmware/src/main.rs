@@ -12,8 +12,7 @@ use embassy_nrf::timer::Frequency;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
-use embassy_sync::channel::Channel;
-use embassy_sync::pubsub::{PubSubChannel, Subscriber};
+use embassy_sync::pubsub::PubSubChannel;
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use {defmt_rtt as _, panic_probe as _};
@@ -29,6 +28,9 @@ mod hardware_consts;
 use hardware_consts::*;
 mod keys;
 mod usb_kb;
+
+#[cfg(feature = "adc_debug")]
+use embassy_time::Instant;
 
 
 // alloc only needed for lsm6ds3tr crate.  Might not be worth that.
@@ -266,9 +268,23 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
     let bufs_inner_size = bufs[0].len();
 
     #[cfg(feature = "adc_debug")]
-    let mut debug_key_index: usize = 0;
+    let mut debug_key_index: isize = 0;
 
     let key_index_map = KEY_INDEX_MAP.get();
+
+    #[cfg(feature = "adc_debug")]
+    {
+        defmt::warn!("in ADC debug mode, not sending any key presses");
+        keys_mutex.lock().await.iter_mut().for_each(|k| {
+            k.toggle_publisher = None;
+        });
+
+        if let Some(keyname) = option_env!("ADC_DEBUG_KEYNAME") {
+            let keynameint: u8 = keyname.parse().expect("couldn't parse ADC_DEBUG_KEYNAME env var");
+            let keyindex = *key_index_map.get(&keynameint).expect("couldn't find keyname from ADC_DEBUG_KEYNAME env var in map");
+            debug_key_index = -(keyindex as isize)
+        }
+    }
 
     loop {
         for muxsetting in keys::MuxSpec::iterator() {
@@ -312,7 +328,7 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                                 keys[keyindex].update_value_adc((*samp)[chan]);
                             }
                             #[cfg(feature = "adc_debug")]
-                            if keyindex == debug_key_index {
+                            if keyindex as isize == debug_key_index.abs() {
                                 let mut values = [0i16; NSAMP];
                                 for (i, samp) in data.iter().enumerate() {
                                     values[i] = (*samp)[chan];
@@ -331,7 +347,10 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
 
 
         #[cfg(feature = "adc_debug")]
-        { debug_key_index = (debug_key_index + 1) % N_KEYS; }
+        { if debug_key_index >= 0 {
+                debug_key_index = (debug_key_index + 1) % (N_KEYS as isize); 
+            } 
+        }
 
     }
 }
