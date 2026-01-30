@@ -1,5 +1,8 @@
+use crate::{KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS};
+use crate::hardware_consts::N_KEYS;
+
 use embassy_nrf::gpio::Level;
-use embassy_sync::channel::Sender;
+use embassy_sync::pubsub::Publisher;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::lazy_lock::LazyLock;
 
@@ -7,7 +10,6 @@ use usbd_hid::descriptor::KeyboardUsage;
 
 use heapless::index_map::FnvIndexMap;
 
-use crate::hardware_consts::N_KEYS;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Layer {
@@ -24,7 +26,7 @@ pub struct KeySignal {
 }
 
 #[derive(Debug)]
-pub struct AnalogKey<M:RawMutex + 'static, const N: usize> 
+pub struct AnalogKey<M:RawMutex + 'static> 
 {
     pub keynumber: u8,  // the "name" of the key - might not be sequential
     pub value: Option<f32>, // the most recent smoothed analog reading for this key
@@ -35,11 +37,11 @@ pub struct AnalogKey<M:RawMutex + 'static, const N: usize>
     pub switch_hysteresis_fraction: f32,
     pub high_is_on: bool,
     pub norm_valid_range: f32,
-    pub toggle_channel: Option<Sender<'static, M, KeySignal, N>>,
+    pub toggle_publisher: Option<Publisher<'static, M, KeySignal, KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS, N_KEYS>>,
 } 
 
-impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
-    pub fn new(keynumber: u8, toggle_channel: Option<Sender<'static, M, KeySignal, N>>) -> Self {
+impl<M: RawMutex> AnalogKey<M> {
+    pub fn new(keynumber: u8, toggle_publisher: Option<Publisher<'static, M, KeySignal, KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS, N_KEYS>>) -> Self {
         AnalogKey {
             keynumber: keynumber,
             value: None,
@@ -50,7 +52,7 @@ impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
             switch_hysteresis_fraction: 0.1,
             high_is_on: false,
             norm_valid_range: 100.,
-            toggle_channel: toggle_channel,
+            toggle_publisher: toggle_publisher,
         }
     }
     pub fn update_value_adc(&mut self, new_adc_value: i16) {
@@ -97,13 +99,13 @@ impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
     }
 
     fn toggled(&self, to_on: bool) {
-        match &self.toggle_channel {
-            Some(sender) => {
+        match &self.toggle_publisher {
+            Some(publisher) => {
                 let signal = KeySignal {
                     toggle_on: to_on,
                     keynumber: self.keynumber,
                 };
-                sender.try_send(signal).expect("send buffer filled, ahhhh!");
+                publisher.try_publish(signal).expect("send buffer filled, ahhhh!");
             }
             None => {}
         }
@@ -135,8 +137,8 @@ impl<M: RawMutex, const N: usize> AnalogKey<M, N> {
     }
 }
 
-impl<M: RawMutex, const N: usize> Default for AnalogKey<M, N> {
-    fn default() -> Self { AnalogKey::<M,N>::new(0, None) }
+impl<M: RawMutex> Default for AnalogKey<M> {
+    fn default() -> Self { AnalogKey::<M>::new(0, None) }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

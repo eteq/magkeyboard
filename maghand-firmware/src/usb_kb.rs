@@ -1,5 +1,5 @@
 use crate::keys::{KeySignal, Layer, KEYMAP};
-use crate::N_CHANNEL_BUFFER;
+use crate::{KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS};
 use crate::hardware_consts::N_KEYS;
 const N_KEYS_POWEROF2: usize = N_KEYS.next_power_of_two();
 
@@ -9,7 +9,7 @@ use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::signal::Signal;
-use embassy_sync::channel::Receiver;
+use embassy_sync::pubsub::{Subscriber, WaitResult};
 use embassy_futures::select::{select, Either};
 use embassy_futures::join::join;
 use embassy_time::Timer;
@@ -28,7 +28,8 @@ const WRITE_REPORT_SIZE: usize = 8;
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task]
-pub async fn usb_task(driver: Driver<'static, HardwareVbusDetect>, key_receiver:Receiver<'static, ThreadModeRawMutex, KeySignal, N_CHANNEL_BUFFER>) {
+pub async fn usb_task(driver: Driver<'static, HardwareVbusDetect>, 
+                      mut key_subscriber: Subscriber<'static, ThreadModeRawMutex, KeySignal, KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS, N_KEYS>) {
     
     let mut config = embassy_usb::Config::new(0xc0de, 0x1983);
     config.manufacturer = Some("Erik's Not-Industries");
@@ -101,7 +102,13 @@ pub async fn usb_task(driver: Driver<'static, HardwareVbusDetect>, key_receiver:
     // this is where the signal comes in and the key press is sent
     let in_fut = async {
         loop {
-            let toggle_data = key_receiver.receive().await;
+            let toggle_data =  match key_subscriber.next_message().await {
+                WaitResult::Lagged(n) => {
+                    defmt::warn!("Key change subscriber lagged by {}", n);
+                    continue;
+                },
+                WaitResult::Message(data) => { data }
+            };
             defmt::debug!("toggled key {} to {}", toggle_data.keynumber, toggle_data.toggle_on);
 
             

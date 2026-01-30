@@ -13,6 +13,7 @@ use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::channel::Channel;
+use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use {defmt_rtt as _, panic_probe as _};
@@ -37,13 +38,19 @@ use embedded_alloc::LlffHeap as Heap;
 static HEAP: Heap = Heap::empty();
 
 // static sync structures
-const N_CHANNEL_BUFFER: usize = 32;
-static CHANNEL: Channel<ThreadModeRawMutex, keys::KeySignal, N_CHANNEL_BUFFER> = Channel::new();
-static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey<ThreadModeRawMutex, N_CHANNEL_BUFFER>; N_KEYS]>> = LazyLock::new(
+//const N_CHANNEL_BUFFER: usize = 32;
+//static CHANNEL: Channel<ThreadModeRawMutex, keys::KeySignal, N_CHANNEL_BUFFER> = Channel::new();
+const KEYCHANGE_BUS_CAP: usize = 32;
+const KEYCHANGE_BUS_SUBS: usize = 5;
+static KEYCHANGE_BUS: PubSubChannel<ThreadModeRawMutex, keys::KeySignal, KEYCHANGE_BUS_CAP, KEYCHANGE_BUS_SUBS, N_KEYS> = PubSubChannel::new();
+
+static KEYS_MUTEX_LAZY: LazyLock<Mutex<ThreadModeRawMutex, [keys::AnalogKey<ThreadModeRawMutex>; N_KEYS]>> = LazyLock::new(
     || Mutex::new(
-        core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i], Some(CHANNEL.sender())))
+        core::array::from_fn(|i| keys::AnalogKey::new(KEY_NAMES[i], 
+            Some(KEYCHANGE_BUS.publisher().expect("couldn't make another keychange publisher"))))
     )
 );
+
 static KEY_INDEX_MAP: LazyLock<FnvIndexMap<u8, usize, 32>> = LazyLock::new(|| {
     let mut keys_to_index: FnvIndexMap<u8, usize, 32> = Default::default();
     for (i, knm) in KEY_NAMES.iter().enumerate() {
@@ -210,14 +217,11 @@ async fn main(spawner: Spawner) {
     Timer::after_millis(100).await; // let things settle
 
     // set up USB
-    // spawner.spawn(usb_kb::usb_task(p.USBD))
-    //     .expect("failed to spawn USB task");
     let usb_driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-    let key_receiver = CHANNEL.receiver();
-
-    spawner.spawn(usb_kb::usb_task(usb_driver, key_receiver))
-        .expect("failed to spawn USB task");
+    spawner.spawn(usb_kb::usb_task(usb_driver, 
+        KEYCHANGE_BUS.subscriber().expect("couldn't make usb keychange subscriber"))
+    ).expect("failed to spawn USB task");
 
 
     //green LED on to indicate setup complete
@@ -256,7 +260,7 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
                      mut mux_a: Output<'static>,
                      mut mux_b: Output<'static>,) {
 
-    let keys_mutex: &Mutex<ThreadModeRawMutex, [keys::AnalogKey<ThreadModeRawMutex, N_CHANNEL_BUFFER>; N_KEYS]> = KEYS_MUTEX_LAZY.get();
+    let keys_mutex= KEYS_MUTEX_LAZY.get();
     
     let mut bufs = [[[0; NCHAN]; NSAMP]; 2];
     let bufs_inner_size = bufs[0].len();
