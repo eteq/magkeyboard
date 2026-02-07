@@ -320,9 +320,6 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
     }
 
     loop {
-        {
-        let mut keys = keys_mutex.lock().await;
-        }
         for muxsetting in keys::MuxSpec::iterator() {
             mux_a.set_level(muxsetting.a);
             mux_b.set_level(muxsetting.b);
