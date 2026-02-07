@@ -105,7 +105,14 @@ impl<M: RawMutex> AnalogKey<M> {
                     toggle_on: to_on,
                     keynumber: self.keynumber,
                 };
-                publisher.try_publish(signal).expect("send buffer filled, ahhhh!");
+                // we use try_publish to avoid blocking here, since that could cause missed ADC readings
+                match publisher.try_publish(signal) {
+                    Ok(()) => {}
+                    Err(_sig) => {
+                        // right now this probably means the USB isn't on.  Should check for that and not worry if it's disconnected
+                        defmt::warn!("Failed to publish key toggle signal for key {}", self.keynumber);
+                    }
+                }
             }
             None => {}
         }

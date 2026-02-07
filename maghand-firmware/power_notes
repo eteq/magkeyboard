@@ -1,0 +1,4 @@
+# at 4.15 V "battery", ~1 mA per LED power level (for full set).  E.g. LED at 100 -> 100 mA per color
+# resting no-LED but vhi on is ~7 mA
+
+

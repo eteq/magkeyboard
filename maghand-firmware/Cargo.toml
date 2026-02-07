@@ -51,3 +51,4 @@ opt-level = "z"
 [features]
 # enables adc value output on defmt debug channel
 adc_debug = []
+leds_pulse_override = []

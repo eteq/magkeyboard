@@ -6,7 +6,7 @@ use embedded_hal::digital::OutputPin;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Flex, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::DutyCycle;
-use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, uarte, usb};
+use embassy_nrf::{Peri, bind_interrupts, peripherals, pwm, saadc, spim, twim, usb};
 use embassy_time::Timer;
 use embassy_nrf::timer::Frequency;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
@@ -28,6 +28,8 @@ mod hardware_consts;
 use hardware_consts::*;
 mod keys;
 mod usb_kb;
+
+const MAX_KEY_LED: u8 = 100;
 
 #[cfg(feature = "adc_debug")]
 use embassy_time::Instant;
@@ -64,7 +66,7 @@ static KEY_INDEX_MAP: LazyLock<FnvIndexMap<u8, usize, 32>> = LazyLock::new(|| {
 
 bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
-    UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
+    //UARTE0 => uarte::InterruptHandler<peripherals::UARTE0>;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -218,6 +220,15 @@ async fn main(spawner: Spawner) {
     }
     Timer::after_millis(100).await; // let things settle
 
+
+    //yellow LED on to indicate all but usb setup complete
+    pwm.set_all_duties([
+        DutyCycle::normal(100),
+        DutyCycle::normal(100),
+        DutyCycle::normal(0),
+        DutyCycle::normal(0),
+    ]);
+
     // set up USB
     let usb_driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
@@ -229,7 +240,7 @@ async fn main(spawner: Spawner) {
     //green LED on to indicate setup complete
     pwm.set_all_duties([
         DutyCycle::normal(0),
-        DutyCycle::normal(100),
+        DutyCycle::normal(100*0),
         DutyCycle::normal(0),
         DutyCycle::normal(0),
     ]);
@@ -244,9 +255,31 @@ async fn main(spawner: Spawner) {
                               mux_b)).expect("failed to spawn adc sampler");
 
 
+    let mut loop_count = 0u32;
+    let mut leddata = [smart_leds::RGB8::new(0, 0, 0); N_KEYS];
     loop {
+        defmt::debug!("looptop {}", vhi_pin.is_set_high());
+
+        let low_count = (loop_count % MAX_KEY_LED as u32) as u8;
+        let high_count = (loop_count / MAX_KEY_LED as u32 % 8) as u8;
+        let r_on = (high_count & 0b1 > 0) as u8;
+        let g_on = (high_count & 0b10 > 0) as u8;
+        let b_on = (high_count & 0b100 > 0) as u8;
+        for i in 0..N_KEYS {
+            leddata[i] = smart_leds::RGB8 {r: low_count * r_on, g:low_count * g_on, b:low_count * b_on};
+        }
+
+        #[cfg(feature = "leds_pulse_override")]
+        {
+            keyleds.write(leddata.iter().cloned()).expect("couldn't set key leds");
+            Timer::after_millis(60).await;
+        }
+
         // just wait, all the action should happen in usb
+        #[cfg(not(feature = "leds_pulse_override"))]
         Timer::after_millis(500).await;
+
+        loop_count += 1;
     }
 }
 
@@ -287,6 +320,9 @@ async fn adc_sampler(mut adc: saadc::Saadc<'static, NCHAN>,
     }
 
     loop {
+        {
+        let mut keys = keys_mutex.lock().await;
+        }
         for muxsetting in keys::MuxSpec::iterator() {
             mux_a.set_level(muxsetting.a);
             mux_b.set_level(muxsetting.b);
